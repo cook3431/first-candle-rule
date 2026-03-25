@@ -252,7 +252,7 @@
   <!-- ═══════════════════════════════ BACKTEST ════════════════════════════ -->
   <div class="range-card" id="backtestSection">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
-      <div class="card-lbl" style="margin:0">📅 Backtest — Past 5 Trading Days</div>
+      <div class="card-lbl" style="margin:0">📅 Backtest — Past 10 Trading Days</div>
       <span style="font-size:10px;color:var(--text-dim)">Click a day to replay</span>
     </div>
 
@@ -715,7 +715,7 @@ function fmtDayLabel(d) {
 let _btActive = null;
 
 function initBacktestDays() {
-  const days  = getBacktestDays(5);
+  const days  = getBacktestDays(10);
   const el    = document.getElementById('btDayBtns');
   el.innerHTML = days.map((d, i) => {
     const ds = fmtDate(d);
