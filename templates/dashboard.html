@@ -152,6 +152,26 @@
     .levels { grid-template-columns:repeat(2,1fr); }
     .headline { font-size:22px; }
   }
+
+  /* ── Monitor mode ──────────────────────────────────────────────────────── */
+  #monitorView { display:none; flex-direction:column; height:calc(100vh - 50px); overflow:hidden; }
+  .mon-watchbar { display:flex; align-items:center; gap:6px; flex-wrap:wrap; padding:8px 12px; background:var(--surface); border-bottom:1px solid var(--border); flex-shrink:0; }
+  .mon-alert-bar { display:none; padding:10px 14px; background:#001a10; border-bottom:2px solid var(--green); flex-shrink:0; }
+  .mon-alert-bar.red { background:#1a0008; border-color:var(--red); }
+  .mon-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(195px,1fr)); gap:10px; padding:12px; overflow-y:auto; flex:1; align-content:start; }
+  /* Stock cards */
+  .sc { border-radius:10px; padding:14px; border:1px solid var(--border); background:var(--surface); cursor:pointer; transition:border-color .2s,transform .15s; }
+  .sc:hover { border-color:var(--blue); transform:translateY(-1px); }
+  .sc-long  { background:#001a10; border:2px solid var(--green-d); animation:flash-g 1s 3; }
+  .sc-short { background:#1a000a; border:2px solid var(--red-d);   animation:flash-r 1s 3; }
+  .sc-watch { background:#1a1600; border-color:var(--yellow-d); }
+  .sc-skip  { opacity:.45; }
+  .sc-title { font-size:15px; font-weight:800; color:var(--bright); }
+  /* Mode toggle */
+  .mode-btns { display:flex; gap:3px; }
+  .mode-btn  { padding:5px 11px; border-radius:5px; border:1px solid var(--border); background:var(--surface2); color:var(--text-dim); cursor:pointer; font-size:11px; font-weight:700; transition:all .15s; }
+  .mode-btn.active { background:var(--blue); color:#fff; border-color:var(--blue); }
+  @media(max-width:500px) { .mon-grid { grid-template-columns:1fr 1fr; gap:7px; padding:7px; } }
 </style>
 </head>
 <body>
@@ -160,7 +180,7 @@
 <!-- HEADER -->
 <div class="header">
   <div class="logo">🕯 <span>FIRST CANDLE</span> RULE</div>
-  <div class="sym-bar">
+  <div class="sym-bar" id="analysisSym">
     <button class="sym-btn active" data-sym="QQQ"  onclick="setSym('QQQ')">QQQ</button>
     <button class="sym-btn"        data-sym="SPY"  onclick="setSym('SPY')">SPY</button>
     <button class="sym-btn"        data-sym="NQ=F" onclick="setSym('NQ=F')">NQ</button>
@@ -168,13 +188,17 @@
     <input  class="sym-input" id="customSym" placeholder="AAPL…"
             onkeydown="if(event.key==='Enter')setSym(this.value.trim().toUpperCase())">
   </div>
+  <div class="mode-btns">
+    <button class="mode-btn active" id="modeAnalysis" onclick="setMonMode('analysis')">📊 Analysis</button>
+    <button class="mode-btn"        id="modeMonitor"  onclick="setMonMode('monitor')">📡 Live Monitor</button>
+  </div>
   <div class="spacer"></div>
   <span class="scan-info" id="scanInfo">–</span>
   <button class="btn btn-gray btn-sm" id="rfBtn" onclick="refresh()">↻ Refresh</button>
 </div>
 
-<!-- MAIN -->
-<div class="main">
+<!-- MAIN (Analysis mode) -->
+<div class="main" id="mainGrid">
 <div class="left">
 
   <!-- Phase strip -->
@@ -356,6 +380,39 @@
 </div>
 
 </div><!-- /main -->
+
+<!-- ══════════════════════ LIVE MONITOR VIEW ══════════════════════════════ -->
+<div id="monitorView">
+
+  <!-- Active signal alert strip (shown when ≥1 signal fires) -->
+  <div class="mon-alert-bar" id="monAlertBar">
+    <div id="monAlertInner" style="display:flex;flex-direction:column;gap:8px"></div>
+  </div>
+
+  <!-- Watchlist bar -->
+  <div class="mon-watchbar" id="monWatchBar">
+    <span style="font-size:11px;color:var(--text-dim);flex-shrink:0">Watching:</span>
+    <div id="monChips" style="display:flex;gap:5px;flex-wrap:wrap"></div>
+    <input id="monAddInput" class="sym-input" placeholder="+ Add symbol"
+           style="width:100px" onkeydown="if(event.key==='Enter'){monAddSym(this.value);this.value='';}">
+    <div class="spacer"></div>
+    <span id="monScanTime" style="font-size:10px;color:var(--text-dim)"></span>
+    <button class="btn btn-gray btn-sm" onclick="monScanAll(true)">↻ Scan all</button>
+  </div>
+
+  <!-- Live status bar: shows a progress indicator while scanning -->
+  <div id="monStatusBar" style="height:2px;background:var(--border);flex-shrink:0;position:relative;overflow:hidden">
+    <div id="monProgress" style="height:100%;width:0%;background:var(--blue);transition:width .3s"></div>
+  </div>
+
+  <!-- Stock grid -->
+  <div class="mon-grid" id="monGrid">
+    <div style="grid-column:1/-1;text-align:center;padding:40px;color:var(--text-dim);font-size:13px">
+      <span class="spinner"></span>&nbsp; Starting live scanner…
+    </div>
+  </div>
+
+</div><!-- /monitorView -->
 </div><!-- /app -->
 
 <script>
@@ -1178,6 +1235,280 @@ function drawBacktestChart(d) {
     }
   });
   _btResizeObs.observe(container);
+}
+
+// ─── Live Monitor ────────────────────────────────────────────────────────────
+
+const MON_DEFAULT_WATCHLIST = ['QQQ','SPY','NQ=F','ES=F','AAPL','MSFT','NVDA','TSLA','AMZN','META'];
+
+function monGetWatchList()  { try { return JSON.parse(localStorage.getItem('monWL') || 'null') || MON_DEFAULT_WATCHLIST.slice(); } catch(e) { return MON_DEFAULT_WATCHLIST.slice(); } }
+function monSaveWatchList(l){ localStorage.setItem('monWL', JSON.stringify(l)); }
+
+let _monMode   = 'analysis';
+let _monData   = {};          // { sym: scanResult }
+let _monPrevSig= {};          // { sym: bool } — track new signals for beep
+let _monTimer  = null;
+let _monScanning = false;
+
+// Priority used to sort cards (highest first)
+function _monPriority(d) {
+  if (!d) return -1;
+  if (d.status === 'SIGNAL')                              return 100;
+  if (d.displacement)                                     return 70;
+  if (d.status === 'NO_SIGNAL' && d.phase === 'AM_KILL_ZONE') return 50;
+  if (d.status === 'NO_SIGNAL')                           return 30;
+  if (d.status === 'WAITING')                             return 20;
+  if (d.status === 'NO_TRADE')                            return 10;
+  return 0;
+}
+
+// ── Mode switch ───────────────────────────────────────────────────────────────
+function setMonMode(mode) {
+  _monMode = mode;
+  const isMonitor = mode === 'monitor';
+  document.getElementById('mainGrid').style.display     = isMonitor ? 'none' : '';
+  document.getElementById('monitorView').style.display  = isMonitor ? 'flex' : 'none';
+  document.getElementById('modeAnalysis').classList.toggle('active', !isMonitor);
+  document.getElementById('modeMonitor').classList.toggle('active',   isMonitor);
+  // Hide analysis symbol bar in monitor mode (watchlist managed in monitor)
+  document.getElementById('analysisSym').style.display  = isMonitor ? 'none' : '';
+  document.getElementById('scanInfo').style.display     = isMonitor ? 'none' : '';
+  document.getElementById('rfBtn').style.display        = isMonitor ? 'none' : '';
+  if (isMonitor) {
+    monRenderWatchBar();
+    monScanAll(true);
+  } else {
+    _monStopTimer();
+  }
+}
+
+// ── Watchlist bar ─────────────────────────────────────────────────────────────
+function monRenderWatchBar() {
+  const wl = monGetWatchList();
+  const chips = document.getElementById('monChips');
+  chips.innerHTML = wl.map(sym => `
+    <span class="sym-btn active" style="display:inline-flex;align-items:center;gap:3px;padding-right:6px">
+      ${sym}
+      <span onclick="monRemoveSym('${sym}')" title="Remove"
+        style="cursor:pointer;color:var(--text-dim);font-size:11px;line-height:1;margin-left:2px">✕</span>
+    </span>`).join('');
+}
+
+function monAddSym(sym) {
+  sym = sym.trim().toUpperCase();
+  if (!sym) return;
+  const wl = monGetWatchList();
+  if (!wl.includes(sym)) { wl.push(sym); monSaveWatchList(wl); }
+  monRenderWatchBar();
+  // Scan just the new symbol immediately
+  _monData[sym] = null;
+  monScanAll(true);
+}
+
+function monRemoveSym(sym) {
+  const wl = monGetWatchList().filter(s => s !== sym);
+  monSaveWatchList(wl);
+  delete _monData[sym];
+  delete _monPrevSig[sym];
+  monRenderWatchBar();
+  monRenderGrid();
+}
+
+// ── Scan all ──────────────────────────────────────────────────────────────────
+async function monScanAll(bust = false) {
+  if (_monScanning && !bust) return;
+  _monScanning = true;
+  _monStopTimer();
+
+  const wl  = monGetWatchList();
+  const prog = document.getElementById('monProgress');
+  let done  = 0;
+
+  const tasks = wl.map(async sym => {
+    try {
+      const ts  = bust ? `&_t=${Date.now()}` : '';
+      const r   = await fetch(`/api/scan?symbol=${encodeURIComponent(sym)}&account=${LS.acct}${ts}`);
+      _monData[sym] = await r.json();
+    } catch(e) {
+      _monData[sym] = { status: 'ERROR', reason: e.message };
+    }
+    done++;
+    if (prog) prog.style.width = `${(done / wl.length) * 100}%`;
+    monRenderGrid();   // update incrementally as each result arrives
+  });
+
+  await Promise.allSettled(tasks);
+  _monScanning = false;
+  if (prog) setTimeout(() => { prog.style.width = '0%'; }, 600);
+
+  // Update scan time
+  const st = document.getElementById('monScanTime');
+  if (st) {
+    const t = new Date().toLocaleTimeString('en-GB', { timeZone:'Europe/London', hour:'2-digit', minute:'2-digit', second:'2-digit', hour12:false });
+    st.textContent = `Scanned ${t} ${_londonTZ}`;
+  }
+
+  // Restart auto-refresh — faster if any displacement detected
+  const hasDisp = Object.values(_monData).some(d => d?.displacement || d?.status === 'SIGNAL');
+  _monStartTimer(hasDisp ? 30_000 : 60_000);
+}
+
+function _monStartTimer(ms) {
+  _monStopTimer();
+  _monTimer = setTimeout(() => monScanAll(false), ms);
+}
+function _monStopTimer() { if (_monTimer) { clearTimeout(_monTimer); _monTimer = null; } }
+
+// ── Render grid ───────────────────────────────────────────────────────────────
+function monRenderGrid() {
+  const wl   = monGetWatchList();
+  const grid = document.getElementById('monGrid');
+  if (!grid) return;
+
+  // Sort by priority
+  const sorted = [...wl].sort((a, b) => _monPriority(_monData[b]) - _monPriority(_monData[a]));
+
+  // Detect new signals → sound + notification
+  sorted.forEach(sym => {
+    const d     = _monData[sym];
+    const isSig = d?.status === 'SIGNAL';
+    if (isSig && !_monPrevSig[sym]) {
+      beep(d.direction === 'LONG' ? 'buy' : 'sell');
+      pushAlert(`📡 MONITOR SIGNAL: ${d.direction} ${sym} @ ${(d.entry||0).toFixed(2)}`,
+                d.direction === 'LONG' ? 'success' : 'danger');
+      if (Notification.permission === 'granted') {
+        new Notification(`🚀 ${d.direction==='LONG'?'▲ BUY':'▼ SELL'} ${sym}`, {
+          body: `Entry ${(d.entry||0).toFixed(2)} | SL ${(d.stop_loss||0).toFixed(2)} | TP ${(d.take_profit||0).toFixed(2)}`,
+        });
+      }
+    }
+    _monPrevSig[sym] = isSig;
+  });
+
+  // Render alert strip
+  const sigs    = sorted.filter(s => _monData[s]?.status === 'SIGNAL');
+  const alertEl = document.getElementById('monAlertBar');
+  const alertIn = document.getElementById('monAlertInner');
+  if (sigs.length) {
+    alertEl.style.display = 'block';
+    alertEl.className     = `mon-alert-bar${sigs.some(s => _monData[s]?.direction==='SHORT') && !sigs.some(s=>_monData[s]?.direction==='LONG') ? ' red' : ''}`;
+    alertIn.innerHTML = sigs.map(sym => {
+      const d = _monData[sym];
+      const isL = d.direction === 'LONG';
+      const col = isL ? 'var(--green)' : 'var(--red)';
+      return `
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          <span class="badge ${isL?'b-long pulse':'b-short pulse'}" style="font-size:12px">
+            ${isL?'▲ BUY':'▼ SELL'} ${sym}
+          </span>
+          <span style="color:var(--bright);font-size:13px">Entry <strong>${(d.entry||0).toFixed(2)}</strong></span>
+          <span style="color:var(--red);font-size:12px">SL ${(d.stop_loss||0).toFixed(2)}</span>
+          <span style="color:var(--green);font-size:12px">TP ${(d.take_profit||0).toFixed(2)}</span>
+          <span style="color:var(--yellow);font-size:12px">R:R ${(d.risk_reward||0).toFixed(1)}:1</span>
+          <button class="btn btn-green btn-sm"
+            onclick="monGoToAnalysis('${sym}')">Open full setup →</button>
+        </div>`;
+    }).join('<div style="border-top:1px solid #00734e;margin:4px 0"></div>');
+  } else {
+    alertEl.style.display = 'none';
+  }
+
+  // Render cards
+  grid.innerHTML = sorted.map(sym => monRenderCard(sym, _monData[sym])).join('');
+}
+
+function monRenderCard(sym, d) {
+  const status = d?.status || null;
+  const bias   = d?.bias   || 'NONE';
+  const fc     = d?.first_candle;
+  const isSig  = status === 'SIGNAL';
+  const isDisp = !!d?.displacement;
+  const isLong = d?.direction === 'LONG';
+
+  const biasCol   = bias==='LONG'?'var(--green)':bias==='SHORT'?'var(--red)':'var(--text-dim)';
+  const biasLabel = bias==='LONG'?'▲ LONG':bias==='SHORT'?'▼ SHORT':'–';
+
+  let cardCls = 'sc';
+  let body    = '';
+
+  if (!d || !status) {
+    // Loading
+    body = `<div style="color:var(--text-dim);font-size:11px"><span class="spinner" style="width:9px;height:9px;border-width:1.5px"></span> Scanning…</div>`;
+
+  } else if (isSig) {
+    cardCls += isLong ? ' sc-long' : ' sc-short';
+    const col = isLong ? 'var(--green)' : 'var(--red)';
+    body = `
+      <div class="badge ${isLong?'b-long pulse':'b-short pulse'}" style="margin:6px 0 10px">
+        ${isLong?'▲ BUY SIGNAL':'▼ SELL SIGNAL'}
+      </div>
+      <div style="display:grid;grid-template-columns:auto 1fr;gap:3px 10px;font-size:12px;margin-bottom:10px">
+        <span style="color:var(--text-dim)">Entry</span>
+        <span style="color:var(--bright);font-weight:700">${(d.entry||0).toFixed(2)}</span>
+        <span style="color:var(--text-dim)">SL</span>
+        <span style="color:var(--red)">${(d.stop_loss||0).toFixed(2)}</span>
+        <span style="color:var(--text-dim)">TP</span>
+        <span style="color:var(--green)">${(d.take_profit||0).toFixed(2)}</span>
+        <span style="color:var(--text-dim)">R:R</span>
+        <span style="color:var(--yellow)">${(d.risk_reward||0).toFixed(1)}:1</span>
+      </div>
+      <button class="btn btn-green" style="width:100%;font-size:11px;padding:7px"
+        onclick="event.stopPropagation();monGoToAnalysis('${sym}')">
+        Open full setup →
+      </button>`;
+
+  } else if (isDisp) {
+    cardCls += ' sc-watch';
+    body = `
+      <div class="badge b-watch pulse" style="margin:4px 0 8px">👁 Displacement!</div>
+      <div style="font-size:11px;color:var(--text)">Watching for FVG back in range</div>
+      ${fc ? `<div style="font-size:10px;color:var(--text-dim);margin-top:4px">Range: ${fc.low} – ${fc.high}</div>` : ''}`;
+
+  } else if (status === 'NO_SIGNAL') {
+    const phaseLabel = { AM_KILL_ZONE:'AM Kill Zone', MID_SESSION:'Mid Session', PM_KILL_ZONE:'PM Kill Zone' }[d.phase] || '';
+    body = `
+      <div style="font-size:11px;color:var(--text-dim);margin-bottom:5px">⏳ No setup yet${phaseLabel?' — '+phaseLabel:''}</div>
+      ${fc ? `<div style="font-size:10px;color:var(--text-dim)">FC: ${fc.low} – ${fc.high}</div>` : ''}
+      <div style="font-size:10px;color:var(--text-dim);margin-top:3px">${d.reason||'Watching for displacement'}</div>`;
+
+  } else if (status === 'WAITING') {
+    const r = d.reason || '';
+    const label = r.includes('forming') ? '🕯 First Candle Forming' :
+                  r.includes('Pre-market')||r.includes('pre') ? '⏳ Pre-Market' : `⏳ ${r||'Waiting'}`;
+    body = `<div style="font-size:11px;color:var(--yellow);font-weight:600;margin-bottom:4px">${label}</div>`;
+    if (d.bias && d.bias !== 'NONE') body += `<div style="font-size:10px;color:var(--text-dim)">Bias set — check back at ${londonTime(10,0)}</div>`;
+
+  } else if (status === 'NO_TRADE') {
+    cardCls += ' sc-skip';
+    body = `<div style="font-size:11px;color:var(--text-dim)">🚫 ${d.reason||'No trade today'}</div>`;
+
+  } else if (status === 'DONE' || status === 'CLOSED') {
+    cardCls += ' sc-skip';
+    body = `<div style="font-size:11px;color:var(--text-dim)">${status==='CLOSED'?'📅 Weekend — market closed':'✅ Session complete'}</div>`;
+
+  } else if (status === 'ERROR') {
+    body = `<div style="font-size:11px;color:var(--red)">⚠ ${(d.reason||'Fetch error').slice(0,60)}</div>`;
+  }
+
+  return `
+    <div class="${cardCls}" onclick="monGoToAnalysis('${sym}')" title="Click to open full analysis">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+        <span class="sc-title">${sym}</span>
+        <span style="font-size:10px;font-weight:700;color:${biasCol}">${biasLabel}</span>
+      </div>
+      ${body}
+      ${d?.scan_time ? `<div style="font-size:9px;color:var(--text-dim);margin-top:8px;padding-top:5px;border-top:1px solid var(--border)">${d.scan_time}</div>` : ''}
+    </div>`;
+}
+
+function monGoToAnalysis(sym) {
+  setMonMode('analysis');
+  LS.sym = sym.toUpperCase();
+  document.querySelectorAll('.sym-btn[data-sym]').forEach(b => b.classList.toggle('active', b.dataset.sym === sym));
+  doScan(true);
+  // Also reload backtest for new sym
+  _btPnLStore = {};
+  setTimeout(initBacktestDays, 200);
 }
 
 // ─── Boot ────────────────────────────────────────────────────────────────────
