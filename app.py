@@ -72,16 +72,21 @@ def api_scan():
 
 @app.route("/api/backtest")
 def api_backtest():
-    symbol   = request.args.get("symbol",  "QQQ").upper().strip()
-    date_str = request.args.get("date",    "").strip()
-    account  = int(request.args.get("account", "100000"))
+    symbol   = request.args.get("symbol",   "QQQ").upper().strip()
+    date_str = request.args.get("date",     "").strip()
+    account  = int(request.args.get("account",  "100000"))
+    interval = request.args.get("interval", "5m").strip()
+
+    if interval not in ("1m", "5m", "15m"):
+        interval = "5m"
 
     if not date_str:
         return jsonify({"status": "ERROR", "reason": "date parameter required"})
 
     try:
         from live_scanner import run_backtest_day
-        result = run_backtest_day(symbol, date_str, account_size=float(account))
+        result = run_backtest_day(symbol, date_str, account_size=float(account),
+                                  display_interval=interval)
     except Exception as e:
         result = {"status": "ERROR", "reason": str(e)}
 

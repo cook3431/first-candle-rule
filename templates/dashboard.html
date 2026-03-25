@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>First Candle Rule</title>
+<script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   :root {
@@ -279,21 +280,27 @@
       <!-- Levels row -->
       <div id="btLevels" class="levels" style="display:none"></div>
 
-      <!-- SVG Price Chart -->
+      <!-- Interactive Price Chart -->
       <div id="btChartWrap" style="display:none;margin-bottom:14px">
-        <div style="font-size:10px;text-transform:uppercase;letter-spacing:.07em;color:var(--text-dim);margin-bottom:6px">
-          Price Replay <span id="btChartRange" style="color:var(--text-dim)"></span>
-        </div>
-        <div style="position:relative;background:var(--bg);border:1px solid var(--border);border-radius:8px;overflow:hidden">
-          <svg id="btChart" width="100%" height="160" style="display:block"></svg>
-          <!-- Legend -->
-          <div style="display:flex;gap:12px;padding:6px 10px;font-size:10px;color:var(--text-dim);border-top:1px solid var(--border);flex-wrap:wrap">
-            <span><span style="display:inline-block;width:20px;height:2px;background:var(--yellow);vertical-align:middle;margin-right:4px"></span>First Candle Range</span>
-            <span><span style="display:inline-block;width:20px;height:2px;background:var(--blue);vertical-align:middle;margin-right:4px"></span>Entry</span>
-            <span><span style="display:inline-block;width:20px;height:2px;background:var(--red);vertical-align:middle;margin-right:4px"></span>Stop Loss</span>
-            <span><span style="display:inline-block;width:20px;height:2px;background:var(--green);vertical-align:middle;margin-right:4px"></span>Take Profit</span>
+        <!-- Interval selector + legend row -->
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px">
+          <span style="font-size:10px;text-transform:uppercase;letter-spacing:.07em;color:var(--text-dim)">Candles</span>
+          <div style="display:flex;gap:4px" id="btIntervalBtns">
+            <button class="sym-btn btn-sm" data-iv="1m"  onclick="setBtInterval('1m',this)">1m</button>
+            <button class="sym-btn btn-sm active" data-iv="5m"  onclick="setBtInterval('5m',this)">5m</button>
+            <button class="sym-btn btn-sm" data-iv="15m" onclick="setBtInterval('15m',this)">15m</button>
+          </div>
+          <span id="btIntervalNote" style="font-size:10px;color:var(--yellow);display:none">⚠ 1m only available last 7 days</span>
+          <div style="flex:1"></div>
+          <div style="display:flex;gap:10px;font-size:10px;color:var(--text-dim)">
+            <span><span style="display:inline-block;width:14px;height:2px;background:var(--yellow);vertical-align:middle;margin-right:3px"></span>FC Range</span>
+            <span><span style="display:inline-block;width:14px;height:2px;background:var(--blue);vertical-align:middle;margin-right:3px"></span>Entry</span>
+            <span><span style="display:inline-block;width:14px;height:2px;background:var(--red);vertical-align:middle;margin-right:3px"></span>SL</span>
+            <span><span style="display:inline-block;width:14px;height:2px;background:var(--green);vertical-align:middle;margin-right:3px"></span>TP</span>
           </div>
         </div>
+        <!-- Chart container — Lightweight Charts renders inside here -->
+        <div id="btChartContainer" style="height:280px;border-radius:8px;overflow:hidden;border:1px solid var(--border);position:relative"></div>
       </div>
 
       <!-- Checklist: exactly what the criteria looked like -->
@@ -736,7 +743,7 @@ async function loadBacktest(dateStr, btn) {
   document.getElementById('btResult').style.display  = 'none';
 
   try {
-    const url = `/api/backtest?symbol=${encodeURIComponent(LS.sym)}&date=${dateStr}&account=${LS.acct}`;
+    const url = `/api/backtest?symbol=${encodeURIComponent(LS.sym)}&date=${dateStr}&account=${LS.acct}&interval=${_btInterval}`;
     const r   = await fetch(url);
     const d   = await r.json();
     if (_btActive === dateStr) renderBacktest(d);
@@ -843,139 +850,196 @@ function renderBacktest(d) {
     narrEl.style.display = 'none';
   }
 
-  // ── SVG Price Chart ──
-  const path = d.price_path || [];
+  // ── Interactive Price Chart ──
   const chartWrap = document.getElementById('btChartWrap');
-  if (path.length > 2 && hasSignal) {
+  if ((d.price_path || []).length > 2) {
     chartWrap.style.display = '';
-    drawBacktestChart(path, sig, fc, d.bias);
-    const times = path.map(p => p.time);
-    if (times.length) document.getElementById('btChartRange').textContent =
-      `(${times[0]} – ${times[times.length-1]})`;
-  } else if (path.length > 2 && !hasSignal) {
-    chartWrap.style.display = '';
-    drawBacktestChart(path, null, fc, d.bias);
+    // Show interval note if backend fell back from 1m
+    const noteEl = document.getElementById('btIntervalNote');
+    if (noteEl && d.price_path_note) {
+      noteEl.textContent = `⚠ ${d.price_path_note}`;
+      noteEl.style.display = '';
+    }
+    drawBacktestChart(d);
   } else {
     chartWrap.style.display = 'none';
   }
 }
 
-function drawBacktestChart(path, sig, fc, bias) {
-  const svg   = document.getElementById('btChart');
-  const W     = svg.getBoundingClientRect().width || 600;
-  const H     = 140;
-  const PAD   = { t:10, r:8, b:22, l:46 };
-  const cW    = W - PAD.l - PAD.r;
-  const cH    = H - PAD.t - PAD.b;
+// ── Lightweight Charts instance management ────────────────────────────────────
+let _btChart        = null;
+let _btInterval     = '5m';
+let _btResizeObs    = null;
+let _btLastData     = null;   // cache last full API response for interval switches
 
-  // Price range
-  const prices = path.flatMap(p => [p.h, p.l]);
-  if (sig) {
-    prices.push(sig.entry, sig.stop_loss, sig.take_profit);
-  }
-  let minP = Math.min(...prices);
-  let maxP = Math.max(...prices);
-  const pad = (maxP - minP) * 0.08;
-  minP -= pad; maxP += pad;
-  const rangeP = maxP - minP || 1;
+function _destroyBtChart() {
+  if (_btResizeObs) { _btResizeObs.disconnect(); _btResizeObs = null; }
+  if (_btChart)     { try { _btChart.remove(); } catch(e){} _btChart = null; }
+}
 
-  function px(price) { return PAD.t + cH * (1 - (price - minP) / rangeP); }
-  function tx(i)     { return PAD.l + (i / (path.length - 1 || 1)) * cW; }
+function setBtInterval(iv, btn) {
+  _btInterval = iv;
+  document.querySelectorAll('#btIntervalBtns .sym-btn').forEach(b => b.classList.remove('active'));
+  if (btn) btn.classList.add('active');
+  const note = document.getElementById('btIntervalNote');
+  if (note) note.style.display = iv === '1m' ? '' : 'none';
+  // Re-fetch with new interval (different cache key)
+  if (_btActive) loadBacktest(_btActive,
+    document.querySelector(`#btDayBtns [data-btdate="${_btActive}"]`));
+}
 
-  // Build SVG
-  let out = `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" style="font-family:monospace">`;
+function drawBacktestChart(d) {
+  _destroyBtChart();
 
-  // Grid lines (4 horizontal)
-  for (let i = 0; i <= 3; i++) {
-    const y = PAD.t + (cH / 3) * i;
-    const v = maxP - (rangeP / 3) * i;
-    out += `<line x1="${PAD.l}" x2="${W-PAD.r}" y1="${y}" y2="${y}" stroke="#1e2d4a" stroke-width="1"/>`;
-    out += `<text x="${PAD.l-3}" y="${y+4}" fill="#5a6a84" font-size="9" text-anchor="end">${v.toFixed(1)}</text>`;
-  }
+  const path   = d.price_path || [];
+  const sig    = d.signal;
+  const out    = d.outcome;
+  const fc     = d.first_candle || {};
+  const status = d.status;
 
-  // First candle range band
-  if (fc && fc.high && fc.low) {
-    const fcTop = px(fc.high);
-    const fcBot = px(fc.low);
-    out += `<rect x="${PAD.l}" y="${fcTop}" width="${cW}" height="${fcBot-fcTop}"
-      fill="rgba(255,193,43,0.08)" stroke="#6b4f00" stroke-width="1" stroke-dasharray="4,3"/>`;
-  }
+  const container = document.getElementById('btChartContainer');
+  if (!container || path.length < 2) return;
+  container.innerHTML = '';   // clear any previous content
 
-  // SL / TP / Entry horizontal lines
-  if (sig) {
-    const lineData = [
-      { price: sig.stop_loss,   color:'#ff4060', label:'SL', dash:'5,3' },
-      { price: sig.take_profit, color:'#00e09a', label:'TP', dash:'5,3' },
-      { price: sig.entry,       color:'#4d9fff', label:'Entry', dash:'3,2' },
-    ];
-    for (const {price, color, label, dash} of lineData) {
-      const y = px(price);
-      out += `<line x1="${PAD.l}" x2="${W-PAD.r}" y1="${y}" y2="${y}"
-        stroke="${color}" stroke-width="1.5" stroke-dasharray="${dash}" opacity="0.85"/>`;
-      out += `<text x="${W-PAD.r+2}" y="${y+4}" fill="${color}" font-size="8">${label}</text>`;
-    }
-  }
+  // ── Create chart ──────────────────────────────────────────────────────────
+  const chart = LightweightCharts.createChart(container, {
+    layout: {
+      background: { type: 'solid', color: '#080d1a' },
+      textColor:  '#5a6a84',
+      fontSize:   11,
+    },
+    grid: {
+      vertLines: { color: '#1e2d4a' },
+      horzLines: { color: '#1e2d4a' },
+    },
+    crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+    rightPriceScale: { borderColor: '#1e2d4a' },
+    timeScale: {
+      borderColor:      '#1e2d4a',
+      timeVisible:      true,
+      secondsVisible:   false,
+      tickMarkFormatter: ts => new Date(ts * 1000).toLocaleTimeString('en-GB', {
+        timeZone: 'Europe/London', hour: '2-digit', minute: '2-digit', hour12: false
+      }),
+    },
+    localization: {
+      timeFormatter: ts => new Date(ts * 1000).toLocaleString('en-GB', {
+        timeZone: 'Europe/London',
+        weekday: 'short', day: 'numeric', month: 'short',
+        hour: '2-digit', minute: '2-digit', hour12: false,
+      }),
+    },
+    width:  container.clientWidth,
+    height: 280,
+    handleScroll:  { mouseWheel: true, pressedMouseMove: true },
+    handleScale:   { mouseWheel: true, pinch: true },
+  });
+  _btChart = chart;
 
-  // Candle bodies (OHLC bars as thin rects)
-  path.forEach((p, i) => {
-    const x    = tx(i);
-    const bw   = Math.max(2, cW / path.length * 0.6);
-    const bull = p.c >= p.o;
-    const col  = bull ? '#00e09a' : '#ff4060';
-    const yH   = px(p.h);
-    const yL   = px(p.l);
-    const yO   = px(p.o);
-    const yC   = px(p.c);
-    // Wick
-    out += `<line x1="${x}" x2="${x}" y1="${yH}" y2="${yL}" stroke="${col}" stroke-width="1" opacity="0.6"/>`;
-    // Body
-    const bodyTop = Math.min(yO, yC);
-    const bodyH   = Math.max(1, Math.abs(yO - yC));
-    out += `<rect x="${x - bw/2}" y="${bodyTop}" width="${bw}" height="${bodyH}" fill="${col}" opacity="0.75"/>`;
+  // ── Candlestick series ────────────────────────────────────────────────────
+  const cs = chart.addCandlestickSeries({
+    upColor:        '#00e09a', downColor:        '#ff4060',
+    borderUpColor:  '#00e09a', borderDownColor:  '#ff4060',
+    wickUpColor:    '#00e09a', wickDownColor:    '#ff4060',
   });
 
-  // Price line (close path)
-  const linePts = path.map((p,i) => `${i===0?'M':'L'}${tx(i)},${px(p.c)}`).join(' ');
-  out += `<path d="${linePts}" fill="none" stroke="#4d9fff" stroke-width="1.5" opacity="0.5"/>`;
+  const candleData = path
+    .map(p => ({ time: p.time, open: p.o, high: p.h, low: p.l, close: p.c }))
+    .sort((a, b) => a.time - b.time);
+  cs.setData(candleData);
 
-  // Signal marker (triangle at entry time)
+  // ── Price lines ───────────────────────────────────────────────────────────
+  const LS_DASHED = LightweightCharts.LineStyle.Dashed;
+  const LS_DOTTED = LightweightCharts.LineStyle.Dotted;
+
+  if (fc.high) cs.createPriceLine({ price: fc.high, color:'#6b4f00', lineWidth:1, lineStyle:LS_DOTTED, axisLabelVisible:false, title:'FC Hi' });
+  if (fc.low)  cs.createPriceLine({ price: fc.low,  color:'#6b4f00', lineWidth:1, lineStyle:LS_DOTTED, axisLabelVisible:false, title:'FC Lo' });
+
   if (sig) {
-    const sigIdx = path.findIndex(p => p.is_signal);
-    if (sigIdx >= 0) {
-      const sx   = tx(sigIdx);
-      const sy   = px(sig.entry);
-      const isL  = sig.direction === 'LONG';
-      const col  = isL ? '#00e09a' : '#ff4060';
-      const tri  = isL
-        ? `${sx},${sy-12} ${sx-7},${sy} ${sx+7},${sy}`
-        : `${sx},${sy+12} ${sx-7},${sy} ${sx+7},${sy}`;
-      out += `<polygon points="${tri}" fill="${col}" opacity="0.95"/>`;
-      out += `<text x="${sx}" y="${isL?sy-15:sy+22}" fill="${col}" font-size="9" text-anchor="middle">${sig.time}</text>`;
-    }
+    cs.createPriceLine({ price:sig.entry,       color:'#4d9fff', lineWidth:1, lineStyle:LS_DASHED, axisLabelVisible:true,  title:'Entry' });
+    cs.createPriceLine({ price:sig.stop_loss,   color:'#ff4060', lineWidth:1, lineStyle:LS_DASHED, axisLabelVisible:true,  title:'SL'    });
+    cs.createPriceLine({ price:sig.take_profit, color:'#00e09a', lineWidth:1, lineStyle:LS_DASHED, axisLabelVisible:true,  title:'TP'    });
   }
 
-  // Exit marker (circle at exit candle)
-  if (sig) {
-    const exitIdx = path.findIndex(p => p.is_exit);
-    if (exitIdx >= 0) {
-      const ex   = tx(exitIdx);
-      const ey   = px(sig.stop_loss && path[exitIdx]?.l <= sig.stop_loss ? sig.stop_loss : sig.take_profit);
-      const col  = sig.stop_loss && (path[exitIdx]?.l||0) <= sig.stop_loss ? '#ff4060' : '#00e09a';
-      out += `<circle cx="${ex}" cy="${ey}" r="5" fill="${col}" opacity="0.9" stroke="#080d1a" stroke-width="1.5"/>`;
+  // ── Entry + exit markers ──────────────────────────────────────────────────
+  if (sig && sig.time_unix) {
+    const markers = [{
+      time:     sig.time_unix,
+      position: sig.direction === 'LONG' ? 'belowBar' : 'aboveBar',
+      color:    sig.direction === 'LONG' ? '#00e09a'  : '#ff4060',
+      shape:    sig.direction === 'LONG' ? 'arrowUp'  : 'arrowDown',
+      text:     `${sig.direction === 'LONG' ? '▲ BUY' : '▼ SELL'} ${sig.entry}`,
+    }];
+    if (out && out.exit_unix) {
+      const win = status === 'WIN';
+      markers.push({
+        time:     out.exit_unix,
+        position: sig.direction === 'LONG' ? 'aboveBar' : 'belowBar',
+        color:    win ? '#00e09a' : '#ff4060',
+        shape:    'circle',
+        text:     `${win ? '✓ TP' : '✗ SL'} ${out.exit_price}`,
+      });
     }
+    cs.setMarkers(markers.sort((a, b) => a.time - b.time));
   }
 
-  // X-axis time labels (show every ~6 candles)
-  const step = Math.max(1, Math.floor(path.length / 6));
-  path.forEach((p, i) => {
-    if (i % step === 0) {
-      out += `<text x="${tx(i)}" y="${H-4}" fill="#5a6a84" font-size="8" text-anchor="middle">${p.time}</text>`;
+  chart.timeScale().fitContent();
+
+  // ── OHLC Tooltip (floating div that follows crosshair) ────────────────────
+  const tip = document.createElement('div');
+  tip.style.cssText = [
+    'position:absolute','z-index:200','pointer-events:none',
+    'background:#0f1629','border:1px solid #1e2d4a','border-radius:6px',
+    'padding:8px 11px','font-size:11px','color:#c8d4e8',
+    'display:none','line-height:1.7','min-width:118px','box-shadow:0 4px 16px rgba(0,0,0,.5)',
+  ].join(';');
+  container.appendChild(tip);
+
+  chart.subscribeCrosshairMove(param => {
+    if (!param.point || !param.time || !param.seriesData) { tip.style.display = 'none'; return; }
+    const bar = param.seriesData.get(cs);
+    if (!bar) { tip.style.display = 'none'; return; }
+
+    const tStr = new Date(param.time * 1000).toLocaleTimeString('en-GB', {
+      timeZone:'Europe/London', hour:'2-digit', minute:'2-digit', hour12:false
+    });
+    const bull = bar.close >= bar.open;
+    const clr  = bull ? '#00e09a' : '#ff4060';
+
+    // Build context lines (is price near a key level?)
+    const levels = [];
+    if (sig) {
+      const tol = (sig.take_profit - sig.entry) * 0.005;
+      if (Math.abs(bar.close - sig.entry)       < tol * 3) levels.push(`<div style="color:#4d9fff;font-size:10px">← Entry zone</div>`);
+      if (Math.abs(bar.close - sig.stop_loss)   < tol * 3) levels.push(`<div style="color:#ff4060;font-size:10px">← Stop Loss</div>`);
+      if (Math.abs(bar.close - sig.take_profit) < tol * 3) levels.push(`<div style="color:#00e09a;font-size:10px">← Take Profit</div>`);
     }
+
+    tip.innerHTML = `
+      <div style="color:#eaf0fb;font-weight:700;margin-bottom:3px">${tStr} ${_londonTZ}</div>
+      <div style="display:grid;grid-template-columns:auto auto;gap:0 10px">
+        <span style="color:#5a6a84">O</span><span>${bar.open.toFixed(2)}</span>
+        <span style="color:#5a6a84">H</span><span style="color:#00e09a">${bar.high.toFixed(2)}</span>
+        <span style="color:#5a6a84">L</span><span style="color:#ff4060">${bar.low.toFixed(2)}</span>
+        <span style="color:#5a6a84">C</span><span style="color:${clr};font-weight:700">${bar.close.toFixed(2)}</span>
+      </div>${levels.join('')}`;
+
+    tip.style.display = 'block';
+    let lx = param.point.x + 16;
+    if (lx + 130 > container.clientWidth) lx = param.point.x - 146;
+    let ty = param.point.y - 65;
+    if (ty < 4) ty = param.point.y + 12;
+    tip.style.left = `${lx}px`;
+    tip.style.top  = `${ty}px`;
   });
 
-  out += '</svg>';
-  svg.outerHTML = out; // Replace to force re-render
-  // Re-cache reference if needed — SVG replaced in DOM
+  // ── Resize observer ───────────────────────────────────────────────────────
+  _btResizeObs = new ResizeObserver(entries => {
+    if (_btChart && entries[0]) {
+      _btChart.resize(entries[0].contentRect.width, 280);
+    }
+  });
+  _btResizeObs.observe(container);
 }
 
 // ─── Boot ────────────────────────────────────────────────────────────────────

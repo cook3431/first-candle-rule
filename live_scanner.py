@@ -535,7 +535,8 @@ def scan(symbol: str, verbose: bool = False, account_size: float = 100_000.0) ->
 # BACKTEST — replay a specific historical date
 # ─────────────────────────────────────────────────────────────
 
-def run_backtest_day(symbol: str, target_date_str: str, account_size: float = 100_000.0) -> dict:
+def run_backtest_day(symbol: str, target_date_str: str, account_size: float = 100_000.0,
+                     display_interval: str = "5m") -> dict:
     """
     Replay the First Candle Rule on a specific past date.
     Returns signal, outcome, price path and all levels for UI visualisation.
@@ -609,19 +610,41 @@ def run_backtest_day(symbol: str, target_date_str: str, account_size: float = 10
     intraday_30m = _candles_for_date(hist_30m, target_date)
     intraday_5m  = _candles_for_date(hist_5m,  target_date)
 
-    # Build full price path for chart (all 5-min candles 9:25–15:05 NY)
+    # ── Helper: naive NY datetime → UTC unix seconds (for Lightweight Charts) ──
+    def _to_unix(ny_naive):
+        ny_aware = EST.localize(ny_naive) if ny_naive.tzinfo is None else ny_naive.astimezone(EST)
+        return int(ny_aware.timestamp())
+
+    # ── Fetch display-interval candles (strategy always uses 5m; display is separate) ──
+    _disp_interval = display_interval  # e.g. "1m", "5m", "15m"
+    price_path_note = None
+
+    if _disp_interval == "5m":
+        disp_candles = intraday_5m
+    else:
+        try:
+            hist_disp = ticker.history(start=tgt_str, end=next_date, interval=_disp_interval)
+            disp_candles = _candles_for_date(hist_disp, target_date)
+            if not disp_candles:
+                raise ValueError("empty")
+        except Exception:
+            disp_candles = intraday_5m
+            _disp_interval = "5m"
+            price_path_note = f"1m data unavailable for this date — showing 5m instead"
+
+    # Build price path (unix timestamps so Lightweight Charts can consume directly)
     price_path = []
-    for c in intraday_5m:
+    for c in disp_candles:
         t = c.timestamp.time()
         if time(9, 25) <= t <= time(15, 5):
             ny_dt = EST.localize(c.timestamp)
             ld_dt = ny_dt.astimezone(LONDON)
             price_path.append({
-                "time":    ld_dt.strftime("%H:%M"),
-                "time_ny": c.timestamp.strftime("%H:%M"),
-                "o": round(c.open, 2),
-                "h": round(c.high, 2),
-                "l": round(c.low,  2),
+                "time":   _to_unix(c.timestamp),          # Unix UTC seconds
+                "time_l": ld_dt.strftime("%H:%M"),         # London label for tooltip
+                "o": round(c.open,  2),
+                "h": round(c.high,  2),
+                "l": round(c.low,   2),
                 "c": round(c.close, 2),
             })
 
@@ -708,34 +731,31 @@ def run_backtest_day(symbol: str, target_date_str: str, account_size: float = 10
                       else (entry - exit_price) / risk_pts) if risk_pts else 0
         outcome    = "WIN" if pnl_r > 0.1 else "LOSS"
 
-    # Convert times to London
+    # Convert times to London + unix
     def _to_london(ny_naive):
         ny_aware = EST.localize(ny_naive) if ny_naive.tzinfo is None else ny_naive.astimezone(EST)
         return ny_aware.astimezone(LONDON).strftime("%H:%M %Z")
 
     sig_time_ld  = _to_london(signal.timestamp) if signal.timestamp else "–"
     exit_time_ld = _to_london(exit_ny_dt)       if exit_ny_dt else "–"
+    sig_unix     = _to_unix(signal.timestamp)   if signal.timestamp else None
+    exit_unix    = _to_unix(exit_ny_dt)         if exit_ny_dt else None
 
     # Duration
     duration_min = 0
     if signal.timestamp and exit_ny_dt:
         duration_min = max(0, int((exit_ny_dt - signal.timestamp).total_seconds() / 60))
 
-    # Mark signal + exit on price_path
-    sig_ny_str  = signal.timestamp.strftime("%H:%M") if signal.timestamp else ""
-    exit_ny_str = exit_ny_dt.strftime("%H:%M")       if exit_ny_dt        else ""
-    for p in price_path:
-        p["is_signal"] = (p["time_ny"] == sig_ny_str)
-        p["is_exit"]   = (p["time_ny"] == exit_ny_str)
-
     return {
-        "status":       outcome,          # WIN | LOSS | NO_SIGNAL | NO_TRADE
-        "date":         target_date_str,
-        "day_name":     day_name,
-        "bias":         bias.value,
-        "pdh":          round(prev_day.high, 2),
-        "pdl":          round(prev_day.low,  2),
-        "first_candle": {"high": round(fc.high, 2), "low": round(fc.low, 2)},
+        "status":            outcome,
+        "date":              target_date_str,
+        "day_name":          day_name,
+        "bias":              bias.value,
+        "display_interval":  _disp_interval,
+        "price_path_note":   price_path_note,
+        "pdh":               round(prev_day.high, 2),
+        "pdl":               round(prev_day.low,  2),
+        "first_candle":      {"high": round(fc.high, 2), "low": round(fc.low, 2)},
         "signal": {
             "direction":   direction.value,
             "entry":       round(entry, 2),
@@ -743,11 +763,13 @@ def run_backtest_day(symbol: str, target_date_str: str, account_size: float = 10
             "take_profit": round(tp, 2),
             "risk_reward": round(signal.risk_reward, 2),
             "time":        sig_time_ld,
+            "time_unix":   sig_unix,
         },
         "outcome": {
             "result":           outcome,
             "exit_price":       round(exit_price, 2) if exit_price else None,
             "exit_time":        exit_time_ld,
+            "exit_unix":        exit_unix,
             "duration_minutes": duration_min,
         },
         "price_path": price_path,
