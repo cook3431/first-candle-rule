@@ -55,7 +55,8 @@ except ImportError:
 # CONSTANTS
 # ─────────────────────────────────────────────────────────────
 
-EST = pytz.timezone("America/New_York")
+EST    = pytz.timezone("America/New_York")
+LONDON = pytz.timezone("Europe/London")
 
 # Session times
 NY_OPEN          = time(9, 30)
@@ -78,13 +79,27 @@ FUTURES_CONFIGS = {
 
 
 class MarketPhase(Enum):
-    WEEKEND          = "Weekend — market closed"
-    PRE_MARKET       = "Pre-market — awaiting NY open (09:30 EST)"
-    FIRST_CANDLE     = "First candle forming — DO NOT TRADE (09:30–10:00)"
-    AM_KILL_ZONE     = "AM Kill Zone (10:00–11:00) — primary window"
-    MID_SESSION      = "Mid-session (11:00–14:00) — lower probability"
-    PM_KILL_ZONE     = "PM Kill Zone (14:00–15:00) — secondary window"
-    DONE             = "Done for today — past stop trading time"
+    WEEKEND      = "Weekend — market closed"
+    PRE_MARKET   = "PRE_MARKET"
+    FIRST_CANDLE = "FIRST_CANDLE"
+    AM_KILL_ZONE = "AM_KILL_ZONE"
+    MID_SESSION  = "MID_SESSION"
+    PM_KILL_ZONE = "PM_KILL_ZONE"
+    DONE         = "DONE"
+
+
+def phase_label(phase: "MarketPhase") -> str:
+    """Return a human-readable phase label with London times."""
+    labels = {
+        MarketPhase.WEEKEND:      "Weekend — market closed",
+        MarketPhase.PRE_MARKET:   f"Pre-market — awaiting NY open ({ny_to_london_str(9,30)} / 09:30 NY)",
+        MarketPhase.FIRST_CANDLE: f"First candle forming — DO NOT TRADE ({ny_to_london_str(9,30)}–{ny_to_london_str(10,0)})",
+        MarketPhase.AM_KILL_ZONE: f"AM Kill Zone ({ny_to_london_str(10,0)}–{ny_to_london_str(11,0)}) — primary window",
+        MarketPhase.MID_SESSION:  f"Mid-session ({ny_to_london_str(11,0)}–{ny_to_london_str(14,0)}) — lower probability",
+        MarketPhase.PM_KILL_ZONE: f"PM Kill Zone ({ny_to_london_str(14,0)}–{ny_to_london_str(15,0)}) — secondary window",
+        MarketPhase.DONE:         f"Done for today — past {ny_to_london_str(15,0)}",
+    }
+    return labels.get(phase, phase.name)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -107,6 +122,18 @@ def get_market_config(symbol: str) -> MarketConfig:
 
 def now_est() -> datetime:
     return datetime.now(EST)
+
+
+def now_london() -> datetime:
+    return datetime.now(LONDON)
+
+
+def ny_to_london_str(h: int, m: int = 0) -> str:
+    """Return a London-time string for a given NY market hour:minute."""
+    now_ny = now_est()
+    ny_dt  = EST.localize(datetime.combine(now_ny.date(), time(h, m)))
+    ld     = ny_dt.astimezone(LONDON)
+    return ld.strftime("%H:%M %Z")  # e.g. "15:00 GMT" or "16:00 BST"
 
 
 def get_market_phase(t: time) -> MarketPhase:
@@ -301,9 +328,10 @@ def scan(symbol: str, verbose: bool = False, account_size: float = 100_000.0) ->
     weekday = now.weekday()  # 0=Mon, 6=Sun
     t = now.time()
 
+    now_ld = now.astimezone(LONDON)
     print(f"\n{'═' * 58}")
     print(f"  FIRST CANDLE RULE  |  {symbol.upper()}")
-    print(f"  {now.strftime('%A %Y-%m-%d  %H:%M:%S EST')}")
+    print(f"  {now_ld.strftime('%A %Y-%m-%d  %H:%M:%S %Z')} ({now.strftime('%H:%M NY')})")
     print(f"{'═' * 58}")
 
     # ── WEEKEND ──
@@ -315,7 +343,7 @@ def scan(symbol: str, verbose: bool = False, account_size: float = 100_000.0) ->
 
     # ── DONE FOR DAY ──
     if phase == MarketPhase.DONE:
-        print(f"\n  Session over. Run again tomorrow from 09:45 EST onward.")
+        print(f"\n  Session over. Run again tomorrow from {ny_to_london_str(9,45)} London time onward.")
         return {"status": "DONE"}
 
     # ── CONFIG ──
@@ -374,8 +402,8 @@ def scan(symbol: str, verbose: bool = False, account_size: float = 100_000.0) ->
     print(f"\n  [2/4] FIRST CANDLE RANGE  ────────────────")
 
     if phase == MarketPhase.PRE_MARKET:
-        print(f"  Market opens at 09:30 EST.")
-        print(f"  Come back at 10:00–10:15 EST (after the first candle closes).")
+        print(f"  Market opens at {ny_to_london_str(9,30)} ({ny_to_london_str(10,0)} London = first candle close).")
+        print(f"  Come back at {ny_to_london_str(10,0)}–{ny_to_london_str(10,15)} London time (after the first candle closes).")
         print(f"  Bias is {bias_str} — prepare to watch for a {'bullish' if bias == Direction.LONG else 'bearish'} setup.")
         return {"status": "WAITING", "reason": "Pre-market", "bias": bias.value}
 
@@ -383,7 +411,7 @@ def scan(symbol: str, verbose: bool = False, account_size: float = 100_000.0) ->
     first_candle_raw = get_first_candle_30min(intraday_30min)
 
     if phase == MarketPhase.FIRST_CANDLE:
-        print(f"  First candle is still forming (closes at 10:00 EST).")
+        print(f"  First candle is still forming (closes at {ny_to_london_str(10,0)} London time).")
         print(f"  DO NOT TRADE during this period — just observe.")
         if first_candle_raw:
             print(f"  In progress: H={first_candle_raw.high:.2f}  L={first_candle_raw.low:.2f}")
@@ -391,7 +419,7 @@ def scan(symbol: str, verbose: bool = False, account_size: float = 100_000.0) ->
 
     if first_candle_raw is None:
         print(f"  WARNING: First candle not found in data.")
-        print(f"  yfinance may have a ~15-min delay. Try again after 10:15 EST.")
+        print(f"  yfinance may have a ~15-min delay. Try again after {ny_to_london_str(10,15)} London time.")
         return {"status": "WAITING", "reason": "First candle data not yet available (delay)"}
 
     fc = strategy.mark_first_candle(first_candle_raw)
@@ -408,7 +436,7 @@ def scan(symbol: str, verbose: bool = False, account_size: float = 100_000.0) ->
     post_range = get_post_range_5min(intraday_5min)
 
     if not post_range:
-        print(f"  No post-range candles yet. Try again after 10:10 EST.")
+        print(f"  No post-range candles yet. Try again after {ny_to_london_str(10,10)} London time.")
         return {"status": "WAITING", "reason": "No post-range candles yet"}
 
     current_price = post_range[-1].close
@@ -460,8 +488,13 @@ def scan(symbol: str, verbose: bool = False, account_size: float = 100_000.0) ->
     print(f"\n  [4/4] SIGNAL  ────────────────────────────")
 
     if signal and signal.signal_type in (SignalType.ENTER_LONG, SignalType.ENTER_SHORT):
-        sig_time = signal.timestamp.strftime("%H:%M") if signal.timestamp else "–"
-        print(f"  Signal generated at: {sig_time} EST")
+        if signal.timestamp:
+            sig_ny = EST.localize(signal.timestamp) if signal.timestamp.tzinfo is None else signal.timestamp.astimezone(EST)
+            sig_ld = sig_ny.astimezone(LONDON)
+            sig_time = f"{sig_ld.strftime('%H:%M %Z')} ({sig_ny.strftime('%H:%M NY')})"
+        else:
+            sig_time = "–"
+        print(f"  Signal generated at: {sig_time}")
         print_signal(symbol, signal, fc.high, fc.low, market_cfg, account_size)
 
         return {
@@ -527,8 +560,8 @@ def watch(symbol: str, interval_seconds: int = 300, verbose: bool = False):
             break
 
         now = now_est()
-        next_check = now + timedelta(seconds=interval_seconds)
-        print(f"  Next check at {next_check.strftime('%H:%M:%S EST')} — sleeping...\n")
+        next_check_ld = now.astimezone(LONDON) + timedelta(seconds=interval_seconds)
+        print(f"  Next check at {next_check_ld.strftime('%H:%M:%S %Z')} — sleeping...\n")
 
         try:
             time_module.sleep(interval_seconds)

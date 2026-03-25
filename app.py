@@ -39,7 +39,12 @@ def run_scan(symbol: str, account_size: int) -> dict:
     except Exception:
         pass
 
-    result["scan_time"] = datetime.utcnow().strftime("%H:%M:%S UTC")
+    try:
+        import pytz as _pytz
+        _london = _pytz.timezone("Europe/London")
+        result["scan_time"] = datetime.now(_london).strftime("%H:%M:%S %Z")
+    except Exception:
+        result["scan_time"] = datetime.utcnow().strftime("%H:%M:%S UTC")
     result["symbol"] = symbol
     return result
 

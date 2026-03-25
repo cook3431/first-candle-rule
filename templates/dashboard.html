@@ -230,7 +230,7 @@
 
   <!-- First candle range -->
   <div class="range-card" id="rangeCard" style="display:none">
-    <div class="card-lbl">First Candle Range — 09:30–10:00 EST</div>
+    <div class="card-lbl" id="fcRangeLabel">First Candle Range</div>
     <div class="range-row">
       <div class="ritem"><div class="rl">High</div><div class="rv g" id="fcH">–</div></div>
       <div class="rsep">|</div>
@@ -272,7 +272,7 @@
       <div>✅ Only enter on a <strong style="color:var(--text)">scanner signal</strong></div>
       <div>🛑 <strong style="color:var(--text)">1 win</strong> → done for the day</div>
       <div>🛑 <strong style="color:var(--text)">2 losses</strong> → done for the day</div>
-      <div>⏰ No entries after <strong style="color:var(--text)">3:00 PM EST</strong></div>
+      <div id="stopTimeRule">⏰ No entries after <strong style="color:var(--text)">–</strong></div>
       <div>🙅 Never widen your stop loss</div>
       <div>🙅 Set levels, then walk away</div>
     </div>
@@ -300,9 +300,43 @@ function getAlerts() { try { return JSON.parse(sessionStorage.getItem('alerts')|
 function saveAlerts(a){ sessionStorage.setItem('alerts', JSON.stringify(a.slice(0,60))); }
 function pushAlert(msg, level='info') {
   const alerts = getAlerts();
-  alerts.unshift({ t: new Date().toLocaleTimeString('en-US',{hour12:false,hour:'2-digit',minute:'2-digit',second:'2-digit'}), msg, level });
+  alerts.unshift({ t: new Date().toLocaleTimeString('en-GB',{timeZone:'Europe/London',hour12:false,hour:'2-digit',minute:'2-digit',second:'2-digit'}), msg, level });
   saveAlerts(alerts);
   renderAlerts(alerts);
+}
+
+// ─── London time helpers ─────────────────────────────────────────────────────
+// Compute once: how many hours London is ahead of New York right now
+const _londonAheadOfNY = (() => {
+  const d   = new Date();
+  const nyD = new Date(d.toLocaleString('en-US', {timeZone:'America/New_York'}));
+  const loD = new Date(d.toLocaleString('en-US', {timeZone:'Europe/London'}));
+  return Math.round((loD - nyD) / 3600000);
+})();
+
+// The London timezone abbreviation (GMT or BST)
+const _londonTZ = (() => {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone:'Europe/London', timeZoneName:'short'
+  }).formatToParts(new Date());
+  return (parts.find(p => p.type === 'timeZoneName') || {value:'GMT'}).value;
+})();
+
+/**
+ * Convert a NY market time (hours, minutes) to a London display string.
+ * e.g. londonTime(10, 0) → "15:00 GMT" or "16:00 BST"
+ */
+function londonTime(nyH, nyM = 0) {
+  const h = (nyH + _londonAheadOfNY + 48) % 24;
+  return `${String(h).padStart(2,'0')}:${String(nyM).padStart(2,'0')} ${_londonTZ}`;
+}
+
+// Populate static labels that reference market times
+function initTimeLabels() {
+  const fcLabel = document.getElementById('fcRangeLabel');
+  if (fcLabel) fcLabel.textContent = `First Candle Range — ${londonTime(9,30)}–${londonTime(10,0)}`;
+  const stRule = document.getElementById('stopTimeRule');
+  if (stRule) stRule.innerHTML = `⏰ No entries after <strong style="color:var(--text)">${londonTime(15,0)}</strong>`;
 }
 
 // ─── Audio ───────────────────────────────────────────────────────────────────
@@ -487,11 +521,11 @@ function render(data) {
       badge.className='badge b-wait pulse'; badge.textContent='🕯 First Candle Forming';
       document.getElementById('headline').className='headline c-yellow';
       document.getElementById('headline').textContent='DO NOT TRADE';
-      document.getElementById('subline').textContent='First candle closes at 10:00 EST — observe only.';
+      document.getElementById('subline').textContent=`First candle closes at ${londonTime(10,0)} — observe only.`;
     } else if (reason.includes('Pre-market')||reason.includes('pre')) {
       badge.className='badge b-wait'; badge.textContent='⏳ Pre-Market';
       document.getElementById('headline').className='headline c-dim';
-      document.getElementById('headline').textContent='Market opens at 09:30 EST';
+      document.getElementById('headline').textContent=`Market opens at ${londonTime(9,30)}`;
       document.getElementById('subline').textContent=data.bias&&data.bias!=='NONE'?`Bias: ${data.bias==='LONG'?'▲ LONG':'▼ SHORT'} — prepare to watch.`:'';
     } else if (data.displacement) {
       badge.className='badge b-watch pulse'; badge.textContent='👁 Displacement — Watching';
@@ -517,7 +551,7 @@ function render(data) {
     document.getElementById('badge').textContent=status==='CLOSED'?'📅 Weekend':'✅ Session Complete';
     document.getElementById('headline').className='headline c-dim';
     document.getElementById('headline').textContent=status==='CLOSED'?'Market Closed':'Done For Today';
-    document.getElementById('subline').textContent=status==='CLOSED'?'Come back on Tuesday.':'No more new trades after 3:00 PM EST.';
+    document.getElementById('subline').textContent=status==='CLOSED'?'Come back on Tuesday.':`No more new trades after ${londonTime(15,0)}.`;
   } else {
     card.classList.add('c-wait');
     document.getElementById('badge').className='badge b-wait';
@@ -585,13 +619,16 @@ function exitTrade() {
 
 // ─── Clock ───────────────────────────────────────────────────────────────────
 function tick() {
-  const n=new Date();
-  const t=n.toLocaleTimeString('en-US',{timeZone:'America/New_York',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false});
-  document.getElementById('liveInd').innerHTML=`<span class="live-dot"></span> ${t} EST`;
+  const n = new Date();
+  const t = n.toLocaleTimeString('en-GB', {timeZone:'Europe/London', hour:'2-digit', minute:'2-digit', second:'2-digit', hour12:false});
+  document.getElementById('liveInd').innerHTML = `<span class="live-dot"></span> ${t} ${_londonTZ}`;
 }
 setInterval(tick,1000); tick();
 
 // ─── Boot ────────────────────────────────────────────────────────────────────
+
+// Populate London-time labels immediately
+initTimeLabels();
 
 // Restore symbol button state
 document.querySelectorAll('.sym-btn').forEach(b=>b.classList.toggle('active',b.dataset.sym===LS.sym));
