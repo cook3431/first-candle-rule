@@ -70,6 +70,26 @@ def api_scan():
     return resp
 
 
+@app.route("/api/backtest")
+def api_backtest():
+    symbol   = request.args.get("symbol",  "QQQ").upper().strip()
+    date_str = request.args.get("date",    "").strip()
+    account  = int(request.args.get("account", "100000"))
+
+    if not date_str:
+        return jsonify({"status": "ERROR", "reason": "date parameter required"})
+
+    try:
+        from live_scanner import run_backtest_day
+        result = run_backtest_day(symbol, date_str, account_size=float(account))
+    except Exception as e:
+        result = {"status": "ERROR", "reason": str(e)}
+
+    resp = make_response(jsonify(result))
+    resp.headers["Cache-Control"] = "public, s-maxage=3600, stale-while-revalidate=7200"
+    return resp
+
+
 @app.route("/api/price")
 def api_price():
     symbol = request.args.get("symbol", "QQQ").upper()

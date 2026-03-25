@@ -249,6 +249,68 @@
     <div class="stat"><div class="sv" id="sPDL">–</div><div class="sl">PDL — support</div></div>
   </div>
 
+  <!-- ═══════════════════════════════ BACKTEST ════════════════════════════ -->
+  <div class="range-card" id="backtestSection">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+      <div class="card-lbl" style="margin:0">📅 Backtest — Past 5 Trading Days</div>
+      <span style="font-size:10px;color:var(--text-dim)">Click a day to replay</span>
+    </div>
+
+    <!-- Day selector buttons -->
+    <div id="btDayBtns" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px"></div>
+
+    <!-- Loading state -->
+    <div id="btLoading" style="display:none;text-align:center;padding:20px;color:var(--text-dim);font-size:12px">
+      <span class="spinner"></span>&nbsp; Loading historical data…
+    </div>
+
+    <!-- Result panel -->
+    <div id="btResult" style="display:none">
+
+      <!-- Outcome header -->
+      <div id="btHeader" style="display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap">
+        <div id="btBadge" class="badge">–</div>
+        <div>
+          <div id="btTitle" style="font-size:18px;font-weight:800;color:var(--bright)">–</div>
+          <div id="btSubtitle" style="font-size:11px;color:var(--text-dim);margin-top:2px">–</div>
+        </div>
+      </div>
+
+      <!-- Levels row -->
+      <div id="btLevels" class="levels" style="display:none"></div>
+
+      <!-- SVG Price Chart -->
+      <div id="btChartWrap" style="display:none;margin-bottom:14px">
+        <div style="font-size:10px;text-transform:uppercase;letter-spacing:.07em;color:var(--text-dim);margin-bottom:6px">
+          Price Replay <span id="btChartRange" style="color:var(--text-dim)"></span>
+        </div>
+        <div style="position:relative;background:var(--bg);border:1px solid var(--border);border-radius:8px;overflow:hidden">
+          <svg id="btChart" width="100%" height="160" style="display:block"></svg>
+          <!-- Legend -->
+          <div style="display:flex;gap:12px;padding:6px 10px;font-size:10px;color:var(--text-dim);border-top:1px solid var(--border);flex-wrap:wrap">
+            <span><span style="display:inline-block;width:20px;height:2px;background:var(--yellow);vertical-align:middle;margin-right:4px"></span>First Candle Range</span>
+            <span><span style="display:inline-block;width:20px;height:2px;background:var(--blue);vertical-align:middle;margin-right:4px"></span>Entry</span>
+            <span><span style="display:inline-block;width:20px;height:2px;background:var(--red);vertical-align:middle;margin-right:4px"></span>Stop Loss</span>
+            <span><span style="display:inline-block;width:20px;height:2px;background:var(--green);vertical-align:middle;margin-right:4px"></span>Take Profit</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Checklist: exactly what the criteria looked like -->
+      <div id="btChecklist" style="display:none;margin-bottom:12px">
+        <div style="font-size:10px;text-transform:uppercase;letter-spacing:.07em;color:var(--text-dim);margin-bottom:6px">Strategy Checklist</div>
+        <div id="btCheckItems" style="display:flex;flex-direction:column;gap:5px;font-size:12px"></div>
+      </div>
+
+      <!-- Trade narrative -->
+      <div id="btNarrative" class="action a-info" style="display:none">
+        <div class="action-t" id="btNarrTitle">–</div>
+        <div class="action-s" id="btNarrBody">–</div>
+      </div>
+
+    </div><!-- /btResult -->
+  </div><!-- /backtestSection -->
+
 </div><!-- /left -->
 
 <!-- RIGHT: alert feed + rules -->
@@ -601,6 +663,8 @@ function setSym(s) {
   document.querySelectorAll('.sym-btn').forEach(b=>b.classList.toggle('active',b.dataset.sym===s.toUpperCase()));
   pushAlert(`Switched to ${s.toUpperCase()}`,'info');
   doScan(true);
+  // Reload backtest for new symbol
+  if (_btActive) loadBacktest(_btActive, document.querySelector(`#btDayBtns [data-btdate="${_btActive}"]`));
 }
 
 function enterTrade() {
@@ -625,6 +689,295 @@ function tick() {
 }
 setInterval(tick,1000); tick();
 
+// ─── Backtest ────────────────────────────────────────────────────────────────
+
+/** Return last N valid backtest trading days (Tue–Fri, excluding today) */
+function getBacktestDays(n = 5) {
+  const days = [];
+  const d = new Date();
+  d.setDate(d.getDate() - 1); // start from yesterday
+  while (days.length < n) {
+    const dow = d.getDay(); // 0=Sun,1=Mon,2=Tue…6=Sat
+    if (dow >= 2 && dow <= 5) {          // Tue–Fri only (Mon skipped by strategy)
+      days.push(new Date(d));
+    }
+    d.setDate(d.getDate() - 1);
+    if (days.length > 30) break;         // safety valve
+  }
+  return days;
+}
+
+function fmtDate(d) { return d.toISOString().split('T')[0]; }
+function fmtDayLabel(d) {
+  return d.toLocaleDateString('en-GB', {weekday:'short', day:'numeric', month:'short'});
+}
+
+let _btActive = null;
+
+function initBacktestDays() {
+  const days  = getBacktestDays(5);
+  const el    = document.getElementById('btDayBtns');
+  el.innerHTML = days.map((d, i) => {
+    const ds = fmtDate(d);
+    return `<button class="sym-btn${i===0?' active':''}" data-btdate="${ds}"
+      onclick="loadBacktest('${ds}',this)">${fmtDayLabel(d)}</button>`;
+  }).join('');
+  // Auto-load the most recent day
+  if (days.length) loadBacktest(fmtDate(days[0]), el.querySelector('[data-btdate]'));
+}
+
+async function loadBacktest(dateStr, btn) {
+  // Highlight selected button
+  document.querySelectorAll('#btDayBtns .sym-btn').forEach(b => b.classList.remove('active'));
+  if (btn) btn.classList.add('active');
+  _btActive = dateStr;
+
+  document.getElementById('btLoading').style.display = '';
+  document.getElementById('btResult').style.display  = 'none';
+
+  try {
+    const url = `/api/backtest?symbol=${encodeURIComponent(LS.sym)}&date=${dateStr}&account=${LS.acct}`;
+    const r   = await fetch(url);
+    const d   = await r.json();
+    if (_btActive === dateStr) renderBacktest(d);
+  } catch(e) {
+    document.getElementById('btLoading').innerHTML =
+      `<span style="color:var(--red)">Error loading backtest: ${e.message}</span>`;
+  }
+}
+
+function renderBacktest(d) {
+  document.getElementById('btLoading').style.display = 'none';
+  document.getElementById('btResult').style.display  = '';
+
+  const status    = d.status || 'NO_SIGNAL';
+  const hasSignal = !!d.signal;
+  const sig       = d.signal   || {};
+  const out       = d.outcome  || {};
+  const fc        = d.first_candle || {};
+
+  // ── Badge + title ──
+  const badge = document.getElementById('btBadge');
+  const title = document.getElementById('btTitle');
+  const sub   = document.getElementById('btSubtitle');
+
+  const cfgMap = {
+    WIN:       { cls:'b-long',  icon:'✅', label:'WIN',       col:'var(--green)' },
+    LOSS:      { cls:'b-short', icon:'❌', label:'LOSS',      col:'var(--red)'   },
+    NO_SIGNAL: { cls:'b-wait',  icon:'⏳', label:'NO SIGNAL', col:'var(--text-dim)' },
+    NO_TRADE:  { cls:'b-skip',  icon:'🚫', label:'NO TRADE',  col:'var(--text-dim)' },
+    CLOSED:    { cls:'b-skip',  icon:'📅', label:'WEEKEND',   col:'var(--text-dim)' },
+    ERROR:     { cls:'b-skip',  icon:'⚠',  label:'ERROR',     col:'var(--yellow)'  },
+  };
+  const cfg = cfgMap[status] || cfgMap['NO_SIGNAL'];
+  badge.className     = `badge ${cfg.cls}`;
+  badge.textContent   = `${cfg.icon} ${cfg.label}`;
+  title.style.color   = cfg.col;
+  title.textContent   = hasSignal
+    ? `${sig.direction==='LONG'?'▲ BUY':'▼ SELL'} — ${status}`
+    : (d.reason || status);
+
+  const dateLabel = d.day_name ? `${d.day_name} ${d.date}` : (d.date || '');
+  sub.textContent = hasSignal
+    ? `${dateLabel}  ·  Signal at ${sig.time||'–'}  ·  Exit at ${out.exit_time||'–'}  ·  ${out.duration_minutes||0} min trade`
+    : `${dateLabel}${d.reason ? '  ·  ' + d.reason : ''}`;
+
+  // ── Levels grid ──
+  const levEl = document.getElementById('btLevels');
+  if (hasSignal) {
+    levEl.style.display = '';
+    levEl.innerHTML = `
+      <div class="lbox"><div class="lbl">Entry</div><div class="val">${sig.entry||'–'}</div><div class="sub">${sig.time||'–'}</div></div>
+      <div class="lbox"><div class="lbl">Stop Loss</div><div class="val r">${sig.stop_loss||'–'}</div><div class="sub">${sig.direction==='LONG'?'Below FC low':'Above FC high'}</div></div>
+      <div class="lbox"><div class="lbl">Take Profit</div><div class="val g">${sig.take_profit||'–'}</div><div class="sub">R:R ${sig.risk_reward||'–'}:1</div></div>
+      <div class="lbox"><div class="lbl">Result</div>
+        <div class="val ${status==='WIN'?'g':'r'}" style="${status!=='WIN'&&status!=='LOSS'?'color:var(--text-dim)':''}">${out.exit_price||'–'}</div>
+        <div class="sub">${out.exit_time||'–'}</div>
+      </div>`;
+  } else {
+    levEl.style.display = 'none';
+  }
+
+  // ── Checklist ──
+  const ckEl   = document.getElementById('btChecklist');
+  const ckItems = document.getElementById('btCheckItems');
+  const biasOk  = d.bias && d.bias !== 'NONE';
+  const fcOk    = !!(fc.high && fc.low);
+  const dispOk  = hasSignal || d.displacement;
+  const fvgOk   = hasSignal;
+  const items   = [
+    { ok: d.day_name && d.day_name !== 'Monday', label: `Not Monday — ${d.day_name||'?'}` },
+    { ok: biasOk, label: `Daily bias — ${d.bias||'None'} ${biasOk?(d.bias==='LONG'?'▲':'▼'):''}` },
+    { ok: fcOk,   label: fcOk ? `First candle: ${fc.low} – ${fc.high}` : 'First candle: no data' },
+    { ok: dispOk, label: dispOk ? 'Displacement break confirmed' : 'No displacement break' },
+    { ok: fvgOk,  label: fvgOk  ? `FVG in range — Entry at ${sig.entry}` : 'No aligned FVG found' },
+  ];
+  ckItems.innerHTML = items.map(it =>
+    `<div style="display:flex;gap:8px;align-items:flex-start">
+       <span style="color:${it.ok?'var(--green)':'var(--red)'};flex-shrink:0">${it.ok?'✓':'✗'}</span>
+       <span style="color:${it.ok?'var(--text)':'var(--text-dim)'}">${it.label}</span>
+     </div>`).join('');
+  ckEl.style.display = '';
+
+  // ── Narrative ──
+  const narrEl = document.getElementById('btNarrative');
+  const narrT  = document.getElementById('btNarrTitle');
+  const narrB  = document.getElementById('btNarrBody');
+  if (hasSignal && out.result) {
+    narrEl.style.display = '';
+    narrEl.className     = `action ${status==='WIN'?'a-success':status==='LOSS'?'a-danger':'a-info'}`;
+    if (status === 'WIN') {
+      const pts = Math.abs((out.exit_price||0) - (sig.entry||0));
+      narrT.textContent = `✅ Trade WON — ${sig.direction==='LONG'?'Bought':'Sold short'} at ${sig.entry}, exited at ${out.exit_price}`;
+      narrB.textContent = `+${pts.toFixed(2)} pts profit in ${out.duration_minutes} minutes. Stop was ${sig.stop_loss} — never needed.`;
+    } else if (status === 'LOSS') {
+      narrT.textContent = `❌ Trade LOST — stopped out at ${out.exit_price}`;
+      narrB.textContent = `Entered ${sig.entry} → hit SL ${sig.stop_loss} after ${out.duration_minutes} min. TP was ${sig.take_profit}. Max loss = 1% of account.`;
+    }
+  } else if (!hasSignal) {
+    narrEl.style.display = '';
+    narrEl.className     = 'action a-info';
+    narrT.textContent    = status === 'NO_TRADE' ? '🚫 Day correctly skipped' : '⏳ No valid setup this day';
+    narrB.textContent    = d.reason || 'The strategy criteria were not met — no trade is the correct outcome.';
+  } else {
+    narrEl.style.display = 'none';
+  }
+
+  // ── SVG Price Chart ──
+  const path = d.price_path || [];
+  const chartWrap = document.getElementById('btChartWrap');
+  if (path.length > 2 && hasSignal) {
+    chartWrap.style.display = '';
+    drawBacktestChart(path, sig, fc, d.bias);
+    const times = path.map(p => p.time);
+    if (times.length) document.getElementById('btChartRange').textContent =
+      `(${times[0]} – ${times[times.length-1]})`;
+  } else if (path.length > 2 && !hasSignal) {
+    chartWrap.style.display = '';
+    drawBacktestChart(path, null, fc, d.bias);
+  } else {
+    chartWrap.style.display = 'none';
+  }
+}
+
+function drawBacktestChart(path, sig, fc, bias) {
+  const svg   = document.getElementById('btChart');
+  const W     = svg.getBoundingClientRect().width || 600;
+  const H     = 140;
+  const PAD   = { t:10, r:8, b:22, l:46 };
+  const cW    = W - PAD.l - PAD.r;
+  const cH    = H - PAD.t - PAD.b;
+
+  // Price range
+  const prices = path.flatMap(p => [p.h, p.l]);
+  if (sig) {
+    prices.push(sig.entry, sig.stop_loss, sig.take_profit);
+  }
+  let minP = Math.min(...prices);
+  let maxP = Math.max(...prices);
+  const pad = (maxP - minP) * 0.08;
+  minP -= pad; maxP += pad;
+  const rangeP = maxP - minP || 1;
+
+  function px(price) { return PAD.t + cH * (1 - (price - minP) / rangeP); }
+  function tx(i)     { return PAD.l + (i / (path.length - 1 || 1)) * cW; }
+
+  // Build SVG
+  let out = `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" style="font-family:monospace">`;
+
+  // Grid lines (4 horizontal)
+  for (let i = 0; i <= 3; i++) {
+    const y = PAD.t + (cH / 3) * i;
+    const v = maxP - (rangeP / 3) * i;
+    out += `<line x1="${PAD.l}" x2="${W-PAD.r}" y1="${y}" y2="${y}" stroke="#1e2d4a" stroke-width="1"/>`;
+    out += `<text x="${PAD.l-3}" y="${y+4}" fill="#5a6a84" font-size="9" text-anchor="end">${v.toFixed(1)}</text>`;
+  }
+
+  // First candle range band
+  if (fc && fc.high && fc.low) {
+    const fcTop = px(fc.high);
+    const fcBot = px(fc.low);
+    out += `<rect x="${PAD.l}" y="${fcTop}" width="${cW}" height="${fcBot-fcTop}"
+      fill="rgba(255,193,43,0.08)" stroke="#6b4f00" stroke-width="1" stroke-dasharray="4,3"/>`;
+  }
+
+  // SL / TP / Entry horizontal lines
+  if (sig) {
+    const lineData = [
+      { price: sig.stop_loss,   color:'#ff4060', label:'SL', dash:'5,3' },
+      { price: sig.take_profit, color:'#00e09a', label:'TP', dash:'5,3' },
+      { price: sig.entry,       color:'#4d9fff', label:'Entry', dash:'3,2' },
+    ];
+    for (const {price, color, label, dash} of lineData) {
+      const y = px(price);
+      out += `<line x1="${PAD.l}" x2="${W-PAD.r}" y1="${y}" y2="${y}"
+        stroke="${color}" stroke-width="1.5" stroke-dasharray="${dash}" opacity="0.85"/>`;
+      out += `<text x="${W-PAD.r+2}" y="${y+4}" fill="${color}" font-size="8">${label}</text>`;
+    }
+  }
+
+  // Candle bodies (OHLC bars as thin rects)
+  path.forEach((p, i) => {
+    const x    = tx(i);
+    const bw   = Math.max(2, cW / path.length * 0.6);
+    const bull = p.c >= p.o;
+    const col  = bull ? '#00e09a' : '#ff4060';
+    const yH   = px(p.h);
+    const yL   = px(p.l);
+    const yO   = px(p.o);
+    const yC   = px(p.c);
+    // Wick
+    out += `<line x1="${x}" x2="${x}" y1="${yH}" y2="${yL}" stroke="${col}" stroke-width="1" opacity="0.6"/>`;
+    // Body
+    const bodyTop = Math.min(yO, yC);
+    const bodyH   = Math.max(1, Math.abs(yO - yC));
+    out += `<rect x="${x - bw/2}" y="${bodyTop}" width="${bw}" height="${bodyH}" fill="${col}" opacity="0.75"/>`;
+  });
+
+  // Price line (close path)
+  const linePts = path.map((p,i) => `${i===0?'M':'L'}${tx(i)},${px(p.c)}`).join(' ');
+  out += `<path d="${linePts}" fill="none" stroke="#4d9fff" stroke-width="1.5" opacity="0.5"/>`;
+
+  // Signal marker (triangle at entry time)
+  if (sig) {
+    const sigIdx = path.findIndex(p => p.is_signal);
+    if (sigIdx >= 0) {
+      const sx   = tx(sigIdx);
+      const sy   = px(sig.entry);
+      const isL  = sig.direction === 'LONG';
+      const col  = isL ? '#00e09a' : '#ff4060';
+      const tri  = isL
+        ? `${sx},${sy-12} ${sx-7},${sy} ${sx+7},${sy}`
+        : `${sx},${sy+12} ${sx-7},${sy} ${sx+7},${sy}`;
+      out += `<polygon points="${tri}" fill="${col}" opacity="0.95"/>`;
+      out += `<text x="${sx}" y="${isL?sy-15:sy+22}" fill="${col}" font-size="9" text-anchor="middle">${sig.time}</text>`;
+    }
+  }
+
+  // Exit marker (circle at exit candle)
+  if (sig) {
+    const exitIdx = path.findIndex(p => p.is_exit);
+    if (exitIdx >= 0) {
+      const ex   = tx(exitIdx);
+      const ey   = px(sig.stop_loss && path[exitIdx]?.l <= sig.stop_loss ? sig.stop_loss : sig.take_profit);
+      const col  = sig.stop_loss && (path[exitIdx]?.l||0) <= sig.stop_loss ? '#ff4060' : '#00e09a';
+      out += `<circle cx="${ex}" cy="${ey}" r="5" fill="${col}" opacity="0.9" stroke="#080d1a" stroke-width="1.5"/>`;
+    }
+  }
+
+  // X-axis time labels (show every ~6 candles)
+  const step = Math.max(1, Math.floor(path.length / 6));
+  path.forEach((p, i) => {
+    if (i % step === 0) {
+      out += `<text x="${tx(i)}" y="${H-4}" fill="#5a6a84" font-size="8" text-anchor="middle">${p.time}</text>`;
+    }
+  });
+
+  out += '</svg>';
+  svg.outerHTML = out; // Replace to force re-render
+  // Re-cache reference if needed — SVG replaced in DOM
+}
+
 // ─── Boot ────────────────────────────────────────────────────────────────────
 
 // Populate London-time labels immediately
@@ -632,6 +985,9 @@ initTimeLabels();
 
 // Restore symbol button state
 document.querySelectorAll('.sym-btn').forEach(b=>b.classList.toggle('active',b.dataset.sym===LS.sym));
+
+// Initialise backtest day buttons (after a short delay so main scan loads first)
+setTimeout(initBacktestDays, 400);
 
 // Initial scan
 doScan();

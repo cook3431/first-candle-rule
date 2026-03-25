@@ -532,6 +532,229 @@ def scan(symbol: str, verbose: bool = False, account_size: float = 100_000.0) ->
 
 
 # ─────────────────────────────────────────────────────────────
+# BACKTEST — replay a specific historical date
+# ─────────────────────────────────────────────────────────────
+
+def run_backtest_day(symbol: str, target_date_str: str, account_size: float = 100_000.0) -> dict:
+    """
+    Replay the First Candle Rule on a specific past date.
+    Returns signal, outcome, price path and all levels for UI visualisation.
+    """
+    import datetime as _dt
+    try:
+        target_date = _dt.date.fromisoformat(target_date_str)
+    except ValueError:
+        return {"status": "ERROR", "reason": f"Invalid date: {target_date_str}"}
+
+    day_name = target_date.strftime("%A")
+
+    # Skip weekends
+    if target_date.weekday() >= 5:
+        return {"status": "CLOSED", "date": target_date_str, "day_name": day_name, "reason": "Weekend"}
+
+    # Monday rule
+    if target_date.weekday() == 0:
+        return {"status": "NO_TRADE", "date": target_date_str, "day_name": day_name,
+                "reason": "Monday — no trades on first day of the weekly cycle"}
+
+    market_cfg = get_market_config(symbol)
+    config = SystemConfig()
+    config.market = market_cfg
+    config.strategy.kill_zone_only = False
+    config.strategy.skip_mondays = True
+
+    strategy = FirstCandleStrategy(config)
+    strategy.reset_daily_state(datetime.combine(target_date, time(0, 0)))
+
+    # ── Daily candles for bias (only days BEFORE target_date) ──
+    ticker = yf.Ticker(symbol)
+    hist_daily = ticker.history(period="30d", interval="1d")
+    daily_candles = []
+    for ts, row in hist_daily.iterrows():
+        dt = to_est_naive(ts)
+        if dt.date() < target_date:
+            daily_candles.append(row_to_candle(dt, row))
+
+    if len(daily_candles) < 3:
+        return {"status": "ERROR", "date": target_date_str, "day_name": day_name,
+                "reason": "Insufficient historical daily data for this date"}
+
+    confirmed_daily = daily_candles[-5:]
+    bias = strategy.determine_bias(confirmed_daily)
+    prev_day = confirmed_daily[-1]
+    strategy.mark_liquidity_levels(prev_day_high=prev_day.high, prev_day_low=prev_day.low)
+    strategy.set_session_open_price(prev_day.close)
+
+    if bias == Direction.NONE:
+        return {"status": "NO_TRADE", "date": target_date_str, "day_name": day_name,
+                "reason": "No clear bias on this day", "bias": "NONE",
+                "pdh": round(prev_day.high, 2), "pdl": round(prev_day.low, 2)}
+
+    # ── Intraday data for target date ──
+    next_date = (target_date + timedelta(days=1)).strftime("%Y-%m-%d")
+    tgt_str   = target_date_str
+
+    hist_30m = ticker.history(start=tgt_str, end=next_date, interval="30m")
+    hist_5m  = ticker.history(start=tgt_str, end=next_date, interval="5m")
+
+    # Build candle lists filtered to target date
+    def _candles_for_date(hist, tgt):
+        out = []
+        for ts, row in hist.iterrows():
+            dt = to_est_naive(ts)
+            if dt.date() == tgt:
+                out.append(row_to_candle(dt, row))
+        return out
+
+    intraday_30m = _candles_for_date(hist_30m, target_date)
+    intraday_5m  = _candles_for_date(hist_5m,  target_date)
+
+    # Build full price path for chart (all 5-min candles 9:25–15:05 NY)
+    price_path = []
+    for c in intraday_5m:
+        t = c.timestamp.time()
+        if time(9, 25) <= t <= time(15, 5):
+            ny_dt = EST.localize(c.timestamp)
+            ld_dt = ny_dt.astimezone(LONDON)
+            price_path.append({
+                "time":    ld_dt.strftime("%H:%M"),
+                "time_ny": c.timestamp.strftime("%H:%M"),
+                "o": round(c.open, 2),
+                "h": round(c.high, 2),
+                "l": round(c.low,  2),
+                "c": round(c.close, 2),
+            })
+
+    # ── First candle ──
+    first_candle_raw = get_first_candle_30min(intraday_30m)
+    if first_candle_raw is None:
+        return {"status": "NO_SIGNAL", "date": target_date_str, "day_name": day_name,
+                "reason": "First candle data not available", "bias": bias.value,
+                "pdh": round(prev_day.high, 2), "pdl": round(prev_day.low, 2),
+                "price_path": price_path}
+
+    fc = strategy.mark_first_candle(first_candle_raw)
+    post_range = get_post_range_5min(intraday_5m)
+
+    if not post_range:
+        return {"status": "NO_SIGNAL", "date": target_date_str, "day_name": day_name,
+                "reason": "No post-range candles available", "bias": bias.value,
+                "first_candle": {"high": round(fc.high, 2), "low": round(fc.low, 2)},
+                "pdh": round(prev_day.high, 2), "pdl": round(prev_day.low, 2),
+                "price_path": price_path}
+
+    # ── Run strategy forward through the day ──
+    signal: Optional[TradeSignal] = None
+    signal_candle_idx: Optional[int] = None
+    candle_buffer: List[Candle] = []
+
+    for i, candle in enumerate(post_range):
+        if candle.timestamp.time() >= STOP_TRADING:
+            break
+        candle_buffer.append(candle)
+        if len(candle_buffer) < 3:
+            continue
+        sig = strategy.generate_signal(candle.timestamp, candle_buffer)
+        if sig.signal_type in (SignalType.ENTER_LONG, SignalType.ENTER_SHORT):
+            signal = sig
+            signal_candle_idx = i
+            break
+
+    displacement_detected = strategy.range_broken_high or strategy.range_broken_low
+
+    if signal is None:
+        return {
+            "status":       "NO_SIGNAL",
+            "date":         target_date_str,
+            "day_name":     day_name,
+            "reason":       "Displacement detected — FVG never formed" if displacement_detected
+                            else "No displacement break of first candle range",
+            "bias":         bias.value,
+            "displacement": displacement_detected,
+            "first_candle": {"high": round(fc.high, 2), "low": round(fc.low, 2)},
+            "pdh":          round(prev_day.high, 2),
+            "pdl":          round(prev_day.low,  2),
+            "price_path":   price_path,
+        }
+
+    # ── Determine outcome ──
+    entry = signal.entry_price
+    sl    = signal.stop_loss
+    tp    = signal.take_profit
+    direction = signal.direction
+
+    outcome      = "OPEN"
+    exit_price   = None
+    exit_ny_dt   = None
+
+    for candle in post_range[signal_candle_idx:]:
+        if direction == Direction.LONG:
+            if candle.low <= sl:
+                outcome    = "LOSS"; exit_price = sl;    exit_ny_dt = candle.timestamp; break
+            if candle.high >= tp:
+                outcome    = "WIN";  exit_price = tp;    exit_ny_dt = candle.timestamp; break
+        else:
+            if candle.high >= sl:
+                outcome    = "LOSS"; exit_price = sl;    exit_ny_dt = candle.timestamp; break
+            if candle.low  <= tp:
+                outcome    = "WIN";  exit_price = tp;    exit_ny_dt = candle.timestamp; break
+    else:
+        # EOD — neither level was reached within the session
+        last       = post_range[-1]
+        exit_price = round(last.close, 2)
+        exit_ny_dt = last.timestamp
+        risk_pts   = abs(entry - sl)
+        pnl_r      = ((exit_price - entry) / risk_pts if direction == Direction.LONG
+                      else (entry - exit_price) / risk_pts) if risk_pts else 0
+        outcome    = "WIN" if pnl_r > 0.1 else "LOSS"
+
+    # Convert times to London
+    def _to_london(ny_naive):
+        ny_aware = EST.localize(ny_naive) if ny_naive.tzinfo is None else ny_naive.astimezone(EST)
+        return ny_aware.astimezone(LONDON).strftime("%H:%M %Z")
+
+    sig_time_ld  = _to_london(signal.timestamp) if signal.timestamp else "–"
+    exit_time_ld = _to_london(exit_ny_dt)       if exit_ny_dt else "–"
+
+    # Duration
+    duration_min = 0
+    if signal.timestamp and exit_ny_dt:
+        duration_min = max(0, int((exit_ny_dt - signal.timestamp).total_seconds() / 60))
+
+    # Mark signal + exit on price_path
+    sig_ny_str  = signal.timestamp.strftime("%H:%M") if signal.timestamp else ""
+    exit_ny_str = exit_ny_dt.strftime("%H:%M")       if exit_ny_dt        else ""
+    for p in price_path:
+        p["is_signal"] = (p["time_ny"] == sig_ny_str)
+        p["is_exit"]   = (p["time_ny"] == exit_ny_str)
+
+    return {
+        "status":       outcome,          # WIN | LOSS | NO_SIGNAL | NO_TRADE
+        "date":         target_date_str,
+        "day_name":     day_name,
+        "bias":         bias.value,
+        "pdh":          round(prev_day.high, 2),
+        "pdl":          round(prev_day.low,  2),
+        "first_candle": {"high": round(fc.high, 2), "low": round(fc.low, 2)},
+        "signal": {
+            "direction":   direction.value,
+            "entry":       round(entry, 2),
+            "stop_loss":   round(sl, 2),
+            "take_profit": round(tp, 2),
+            "risk_reward": round(signal.risk_reward, 2),
+            "time":        sig_time_ld,
+        },
+        "outcome": {
+            "result":           outcome,
+            "exit_price":       round(exit_price, 2) if exit_price else None,
+            "exit_time":        exit_time_ld,
+            "duration_minutes": duration_min,
+        },
+        "price_path": price_path,
+    }
+
+
+# ─────────────────────────────────────────────────────────────
 # WATCH MODE
 # ─────────────────────────────────────────────────────────────
 
