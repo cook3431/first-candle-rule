@@ -187,6 +187,21 @@
   .port-total { background:var(--bg)!important; border-left:1px solid var(--border)!important; text-align:center; line-height:1.5; }
   .port-col-total td { background:var(--bg); font-weight:700; font-size:11px; }
   .port-grand { background:var(--surface)!important; font-size:13px!important; border-left:2px solid var(--border)!important; }
+
+  /* ── Broker / auto-execute ────────────────────────────────────────────── */
+  @keyframes fadeInUp { from{opacity:0;transform:translateY(10px)} to{opacity:1;transform:translateY(0)} }
+
+  /* Toggle pill */
+  .ae-wrap { display:flex; align-items:center; gap:7px; padding:4px 10px; background:var(--surface2); border:1px solid var(--border); border-radius:6px; opacity:.35; transition:opacity .25s; }
+  .ae-wrap.ready { opacity:1; }
+  .ae-track { position:relative; width:34px; height:18px; cursor:pointer; flex-shrink:0; }
+  .ae-track input { opacity:0; width:0; height:0; position:absolute; }
+  .ae-rail  { position:absolute; inset:0; border-radius:9px; background:var(--gray); transition:.2s; }
+  .ae-thumb { position:absolute; height:14px; width:14px; left:2px; bottom:2px; border-radius:50%; background:#fff; transition:.2s; }
+  .ae-track input:checked ~ .ae-rail  { background:var(--green); }
+  .ae-track input:checked ~ .ae-thumb { transform:translateX(16px); }
+  .ae-lbl   { font-size:11px; font-weight:700; color:var(--text-dim); white-space:nowrap; user-select:none; }
+  .ae-lbl.on { color:var(--green); }
 </style>
 </head>
 <body>
@@ -214,6 +229,15 @@
     <button class="mode-btn"        id="modeMonitor"  onclick="setMonMode('monitor')">📡 Live Monitor</button>
   </div>
   <div class="spacer"></div>
+  <!-- Alpaca auto-execute toggle — greyed out until broker keys configured -->
+  <div class="ae-wrap" id="aeWrap" title="Requires ALPACA_API_KEY in Vercel environment variables">
+    <label class="ae-track" onclick="toggleAutoExecute()">
+      <input type="checkbox" id="aeToggle" disabled>
+      <span class="ae-rail"></span>
+      <span class="ae-thumb"></span>
+    </label>
+    <span class="ae-lbl" id="aeLbl">Auto-Execute</span>
+  </div>
   <span class="scan-info" id="scanInfo">–</span>
   <button class="btn btn-gray btn-sm" id="rfBtn" onclick="refresh()">↻ Refresh</button>
 </div>
@@ -270,6 +294,12 @@
       <div class="trade-btns" id="tradeBtns">
         <button class="btn btn-green" id="enterBtn" onclick="enterTrade()">✓ I'M IN THE TRADE</button>
         <button class="btn btn-red"   id="exitBtn"  onclick="exitTrade()" style="display:none">✗ CLOSE TRADE</button>
+        <!-- Shown when auto-execute is ON -->
+        <div id="brokerStatusLine" style="display:none;font-size:11px;color:var(--green);padding:7px 12px;
+          background:#001a10;border-radius:6px;border:1px solid var(--green-d);font-weight:600">
+          <span class="live-dot" style="background:var(--green);margin-right:5px"></span>
+          Auto-Execute ON — order will be placed via Alpaca automatically
+        </div>
       </div>
     </div>
   </div>
@@ -414,6 +444,16 @@
     </div>
   </div>
 
+  <!-- Broker Positions Card — hidden until Alpaca keys are configured -->
+  <div class="card" id="positionsCard" style="display:none;flex-shrink:0">
+    <div class="card-lbl" style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+      <span>🏦 Open Positions</span>
+      <button onclick="refreshPositions()" style="background:none;border:none;color:var(--blue);cursor:pointer;font-size:12px;padding:0" title="Refresh positions">↻</button>
+    </div>
+    <div id="accountInfo" style="padding-bottom:8px;border-bottom:1px solid var(--border);margin-bottom:8px;font-size:11px;color:var(--text-dim)">Loading account…</div>
+    <div id="positionsList"><div style="color:var(--text-dim);font-size:11px">No open positions</div></div>
+  </div>
+
   <div class="card">
     <div class="card-lbl">Daily Rules</div>
     <div style="display:flex;flex-direction:column;gap:6px;font-size:12px;color:var(--text-dim)">
@@ -475,6 +515,25 @@ const LS = {
   set inTrade(v){ localStorage.setItem('inTrade', String(v)); },
   get signal()  { try{ return JSON.parse(localStorage.getItem('signal') || 'null'); }catch{ return null; } },
   set signal(v) { localStorage.setItem('signal', JSON.stringify(v)); },
+
+  // ── Broker / auto-execute ──
+  get autoExecute()   { return localStorage.getItem('autoExecute') === 'true'; },
+  set autoExecute(v)  { localStorage.setItem('autoExecute', String(v)); },
+  // executedToday: { "QQQ": "2026-03-25" } — prevents duplicate orders same day
+  get executedToday() {
+    try { return JSON.parse(localStorage.getItem('executedToday') || '{}'); } catch { return {}; }
+  },
+  set executedToday(v){ localStorage.setItem('executedToday', JSON.stringify(v)); },
+  wasExecutedToday(sym) {
+    const today = new Date().toISOString().split('T')[0];
+    return this.executedToday[sym] === today;
+  },
+  markExecutedToday(sym) {
+    const today = new Date().toISOString().split('T')[0];
+    const et = this.executedToday;
+    et[sym] = today;
+    this.executedToday = et;
+  },
 };
 
 // Alerts live in sessionStorage (cleared when tab closes)
@@ -636,6 +695,10 @@ function render(data) {
     setTimeout(()=>document.getElementById('sigCard').classList.remove('fx-g','fx-r'),3500);
     pushAlert(`SIGNAL: ${d} ${data.symbol} @ ${(e||0).toFixed(2)} | SL ${(data.stop_loss||0).toFixed(2)} | TP ${(data.take_profit||0).toFixed(2)} | R:R ${(data.risk_reward||0).toFixed(1)}`, d==='LONG'?'success':'danger');
     if (Notification.permission==='granted') new Notification(`${d==='LONG'?'▲ BUY':'▼ SELL'} ${data.symbol}`,{body:`Entry ${(e||0).toFixed(2)} | SL ${(data.stop_loss||0).toFixed(2)} | TP ${(data.take_profit||0).toFixed(2)}`});
+    // ── AUTO-EXECUTE ───────────────────────────────────────────────────────
+    if (LS.autoExecute && _brokerEnabled && !data.symbol.endsWith('=F')) {
+      autoExecuteTrade(data);
+    }
   }
   prevStatus = status;
 
@@ -692,8 +755,10 @@ function render(data) {
     document.getElementById('actionBox').innerHTML=`<div class="action ${a.cls}"><div class="action-t">${a.title}</div><div class="action-s">${a.sub}</div></div>`;
 
     document.getElementById('tradeBtns').style.display='flex';
-    document.getElementById('enterBtn').style.display=inTrade?'none':'';
-    document.getElementById('exitBtn').style.display=inTrade?'':'none';
+    const _isAutoMode = LS.autoExecute && _brokerEnabled;
+    document.getElementById('enterBtn').style.display     = (inTrade || _isAutoMode) ? 'none' : '';
+    document.getElementById('exitBtn').style.display      = inTrade ? '' : 'none';
+    document.getElementById('brokerStatusLine').style.display = (_isAutoMode && !inTrade) ? '' : 'none';
 
   } else if (status==='NO_SIGNAL'||status==='WAITING') {
     card.classList.add(data.displacement?'c-watch':'c-wait');
@@ -789,8 +854,12 @@ function setSym(s) {
 }
 
 function enterTrade() {
+  if (LS.autoExecute && _brokerEnabled) {
+    pushAlert('Auto-execute is ON — Alpaca will place the order automatically when a signal fires.','info');
+    return;
+  }
   LS.inTrade=true;
-  pushAlert('Trade marked ACTIVE — watching SL/TP levels','success');
+  pushAlert('Trade marked ACTIVE (manual) — watching SL/TP levels','success');
   if(Notification.permission==='default') Notification.requestPermission();
   render(Object.assign({},LS.signal||{},{current_price:null}));
   doScan(true);
@@ -799,7 +868,197 @@ function exitTrade() {
   if(!confirm('Mark this trade as closed and reset the scanner?')) return;
   LS.inTrade=false; LS.signal=null;
   pushAlert('Trade closed — scanner reset','info');
+  if (_brokerEnabled) refreshPositions();
   doScan(true);
+}
+
+// ─── Broker / Auto-Execute ───────────────────────────────────────────────────
+
+let _brokerEnabled = false;   // set by checkBrokerStatus() on page load
+
+async function checkBrokerStatus() {
+  try {
+    const r = await fetch('/api/broker/status');
+    const d = await r.json();
+    _brokerEnabled = d.configured === true;
+  } catch(e) {
+    _brokerEnabled = false;
+  }
+  updateAutoExecuteUI();
+  if (_brokerEnabled) {
+    document.getElementById('positionsCard').style.display = '';
+    refreshPositions();
+    refreshAccount();
+  }
+}
+
+function updateAutoExecuteUI() {
+  const wrap   = document.getElementById('aeWrap');
+  const toggle = document.getElementById('aeToggle');
+  const lbl    = document.getElementById('aeLbl');
+  if (!wrap) return;
+
+  if (!_brokerEnabled) {
+    wrap.classList.remove('ready');
+    toggle.disabled  = true;
+    toggle.checked   = false;
+    lbl.textContent  = 'Auto-Execute';
+    lbl.classList.remove('on');
+    return;
+  }
+
+  wrap.classList.add('ready');
+  toggle.disabled = false;
+  toggle.checked  = LS.autoExecute;
+  lbl.textContent = LS.autoExecute ? 'Auto-Execute: ON' : 'Auto-Execute: OFF';
+  lbl.classList.toggle('on', LS.autoExecute);
+}
+
+function toggleAutoExecute() {
+  if (!_brokerEnabled) return;
+  LS.autoExecute = !LS.autoExecute;
+  updateAutoExecuteUI();
+  pushAlert(`Auto-Execute ${LS.autoExecute ? 'ENABLED — trades will be placed automatically via Alpaca' : 'DISABLED — manual mode'}`, LS.autoExecute ? 'success' : 'info');
+  // Re-render to update button visibility
+  if (LS.signal) render(Object.assign({}, LS.signal, {current_price: null}));
+}
+
+async function autoExecuteTrade(sig) {
+  const sym = sig.symbol || LS.sym;
+
+  // Guards
+  if (sym.endsWith('=F')) {
+    showToast(`Alpaca doesn't support futures (${sym}) — skipped`, 'warning'); return;
+  }
+  if (LS.wasExecutedToday(sym)) {
+    pushAlert(`Already executed ${sym} today — duplicate guard active`, 'warning'); return;
+  }
+  const validPhases = ['AM_KILL_ZONE', 'PM_KILL_ZONE'];
+  if (sig.phase && !validPhases.includes(sig.phase)) {
+    pushAlert(`Not in kill zone (${sig.phase}) — auto-execute skipped`, 'warning'); return;
+  }
+
+  showToast(`⚡ Executing ${sig.direction} ${sym}…`, 'info');
+  pushAlert(`Auto-executing: ${sig.direction} ${sym} @ ${(sig.entry||0).toFixed(2)} | SL ${(sig.stop_loss||0).toFixed(2)} | TP ${(sig.take_profit||0).toFixed(2)}`, 'info');
+
+  try {
+    const r = await fetch('/api/broker/execute', {
+      method:  'POST',
+      headers: {'Content-Type': 'application/json'},
+      body:    JSON.stringify({
+        symbol:      sym,
+        direction:   sig.direction,
+        entry:       sig.entry,
+        stop_loss:   sig.stop_loss,
+        take_profit: sig.take_profit,
+      }),
+    });
+    const d = await r.json();
+
+    if (d.success) {
+      LS.markExecutedToday(sym);
+      LS.inTrade = true;
+      LS.signal  = sig;
+      const mode = d.paper ? '[PAPER]' : '[LIVE]';
+      showToast(`✅ ${mode} Order placed! ${d.qty} × ${sym}`, 'success');
+      pushAlert(
+        `${mode} BRACKET ORDER PLACED: ${d.side} ${d.qty} × ${d.symbol} | Entry $${d.entry} | SL $${d.stop_loss} | TP $${d.take_profit} | ID: ${(d.order_id||'').slice(0,8)}…`,
+        'success'
+      );
+      setTimeout(refreshPositions, 1500);   // brief delay so Alpaca reflects the order
+    } else {
+      showToast(`⚠ Order failed: ${d.error || 'Unknown error'}`, 'danger');
+      pushAlert(`Broker error: ${d.error || 'Unknown error'}`, 'danger');
+    }
+  } catch(e) {
+    showToast(`Network error: ${e.message}`, 'danger');
+    pushAlert(`Execution network error: ${e.message}`, 'danger');
+  }
+}
+
+/** Floating toast notification — auto-dismisses after 5s */
+function showToast(msg, level = 'info') {
+  const colors = {success:'var(--green)', danger:'var(--red)', info:'var(--blue)', warning:'var(--yellow)'};
+  const el = document.createElement('div');
+  el.style.cssText = `position:fixed;bottom:20px;right:20px;z-index:9999;
+    background:var(--surface2);border:1px solid ${colors[level]||colors.info};
+    color:var(--bright);padding:12px 18px;border-radius:8px;font-size:13px;font-weight:600;
+    box-shadow:0 4px 20px rgba(0,0,0,.5);max-width:400px;animation:fadeInUp .25s ease;`;
+  el.textContent = msg;
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), 5000);
+}
+
+async function refreshPositions() {
+  const el = document.getElementById('positionsList');
+  if (!el || !_brokerEnabled) return;
+  try {
+    const r = await fetch('/api/broker/positions');
+    const d = await r.json();
+    renderPositions(d);
+  } catch(e) {
+    if (el) el.innerHTML = `<div style="color:var(--red);font-size:11px">Error: ${e.message}</div>`;
+  }
+}
+
+function renderPositions(data) {
+  const el = document.getElementById('positionsList');
+  if (!el) return;
+
+  const modeTag = `<span style="color:${data.paper?'var(--yellow)':'var(--green)'};font-size:9px;font-weight:700">${data.paper?'PAPER':'LIVE'}</span>`;
+
+  if (!data.success) {
+    el.innerHTML = `<div style="color:var(--text-dim);font-size:11px">${data.error||'Unavailable'} ${modeTag}</div>`;
+    return;
+  }
+
+  const positions = data.positions || [];
+  if (!positions.length) {
+    el.innerHTML = `<div style="color:var(--text-dim);font-size:11px">No open positions &nbsp;${modeTag}</div>`;
+    return;
+  }
+
+  el.innerHTML = positions.map(p => {
+    const pl    = p.unrealized_pl || 0;
+    const plPct = p.unrealized_plpc ? (p.unrealized_plpc * 100).toFixed(2) : '–';
+    const col   = pl >= 0 ? 'var(--green)' : 'var(--red)';
+    const sign  = pl >= 0 ? '+' : '';
+    return `
+      <div style="padding:8px 0;border-bottom:1px solid var(--border)">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:2px">
+          <span style="font-weight:800;color:var(--bright);font-size:13px">${p.symbol}</span>
+          <span style="color:${col};font-weight:700;font-size:13px">${sign}$${Math.abs(pl).toFixed(2)}</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--text-dim)">
+          <span>${p.qty} sh · ${(p.side||'').toUpperCase()} · avg $${(p.avg_entry||0).toFixed(2)}</span>
+          <span style="color:${col}">${sign}${plPct}%</span>
+        </div>
+      </div>`;
+  }).join('') + `<div style="margin-top:6px;font-size:9px;color:var(--text-dim)">${modeTag} account</div>`;
+}
+
+async function refreshAccount() {
+  const el = document.getElementById('accountInfo');
+  if (!el || !_brokerEnabled) return;
+  try {
+    const r = await fetch('/api/broker/account');
+    const d = await r.json();
+    if (d.success) {
+      const bp = parseFloat(d.buying_power).toLocaleString('en-US',{minimumFractionDigits:0,maximumFractionDigits:0});
+      const eq = parseFloat(d.equity).toLocaleString('en-US',{minimumFractionDigits:0,maximumFractionDigits:0});
+      el.innerHTML = `
+        <div style="display:flex;justify-content:space-between">
+          <span>Buying Power</span><span style="color:var(--bright);font-weight:700">$${bp}</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;margin-top:2px">
+          <span>Equity</span><span style="color:var(--bright)">$${eq}</span>
+        </div>`;
+    } else {
+      el.innerHTML = `<span style="color:var(--red)">${d.error||'Error'}</span>`;
+    }
+  } catch(e) {
+    el.innerHTML = `<span style="color:var(--red)">Network error</span>`;
+  }
 }
 
 // ─── Clock ───────────────────────────────────────────────────────────────────
@@ -1430,6 +1689,10 @@ function monRenderGrid() {
           body: `Entry ${(d.entry||0).toFixed(2)} | SL ${(d.stop_loss||0).toFixed(2)} | TP ${(d.take_profit||0).toFixed(2)}`,
         });
       }
+      // ── AUTO-EXECUTE from Monitor mode ──────────────────────────────────
+      if (LS.autoExecute && _brokerEnabled && !sym.endsWith('=F')) {
+        autoExecuteTrade(d);
+      }
     }
     _monPrevSig[sym] = isSig;
   });
@@ -1763,6 +2026,12 @@ function renderPortfolioTable() {
 }
 
 // ─── Boot ────────────────────────────────────────────────────────────────────
+
+// Check broker status — enables auto-execute toggle if Alpaca keys are configured
+checkBrokerStatus();
+
+// Refresh positions every 30 s when broker is active
+setInterval(() => { if (_brokerEnabled) refreshPositions(); }, 30_000);
 
 // Populate London-time labels immediately
 initTimeLabels();

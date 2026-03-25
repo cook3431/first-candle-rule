@@ -112,4 +112,57 @@ def api_price():
         return jsonify({"price": None, "error": str(e)})
 
 
+# ─── Broker Routes ───────────────────────────────────────────────────────────
+
+@app.route("/api/broker/status")
+def api_broker_status():
+    """Check whether Alpaca integration is configured — called on every page load."""
+    from broker import broker_status
+    return jsonify(broker_status())
+
+
+@app.route("/api/broker/execute", methods=["POST"])
+def api_broker_execute():
+    """
+    Place a bracket order on Alpaca.
+    Body JSON: { symbol, direction, entry, stop_loss, take_profit }
+    Risk is fixed at $100 per trade (qty calculated server-side).
+    """
+    from broker import execute_bracket_order
+    data = request.get_json(silent=True) or {}
+
+    symbol      = str(data.get("symbol",      "")).upper().strip()
+    direction   = str(data.get("direction",   "")).upper().strip()
+    entry       = float(data.get("entry",       0) or 0)
+    stop_loss   = float(data.get("stop_loss",   0) or 0)
+    take_profit = float(data.get("take_profit", 0) or 0)
+
+    if not symbol or direction not in ("LONG", "SHORT") or not entry or not stop_loss or not take_profit:
+        return jsonify({"success": False, "error": "Missing or invalid parameters."}), 400
+
+    result = execute_bracket_order(symbol, direction, entry, stop_loss, take_profit, risk_dollars=100.0)
+    return jsonify(result), (200 if result["success"] else 422)
+
+
+@app.route("/api/broker/positions")
+def api_broker_positions():
+    """Return all currently open positions."""
+    from broker import get_positions
+    return jsonify(get_positions())
+
+
+@app.route("/api/broker/account")
+def api_broker_account():
+    """Return account balance and buying power."""
+    from broker import get_account
+    return jsonify(get_account())
+
+
+@app.route("/api/broker/cancel/<order_id>", methods=["DELETE"])
+def api_broker_cancel(order_id):
+    """Cancel a pending order by ID."""
+    from broker import cancel_order
+    return jsonify(cancel_order(order_id))
+
+
 # Vercel needs the `app` object at module level — nothing else needed
