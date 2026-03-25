@@ -257,8 +257,15 @@
       <span style="font-size:10px;color:var(--text-dim)">Click a day to replay</span>
     </div>
 
+    <!-- P&L Summary strip -->
+    <div id="btPnLSummary" style="margin-bottom:12px">
+      <div style="display:flex;align-items:center;gap:6px;padding:9px 12px;background:var(--bg);border:1px solid var(--border);border-radius:8px;font-size:11px;color:var(--text-dim)">
+        <span class="spinner"></span>&nbsp;Calculating 10-day P&amp;L…
+      </div>
+    </div>
+
     <!-- Day selector buttons -->
-    <div id="btDayBtns" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px"></div>
+    <div id="btDayBtns" style="display:flex;gap:5px;flex-wrap:wrap;margin-bottom:12px"></div>
 
     <!-- Loading state -->
     <div id="btLoading" style="display:none;text-align:center;padding:20px;color:var(--text-dim);font-size:12px">
@@ -670,8 +677,9 @@ function setSym(s) {
   document.querySelectorAll('.sym-btn').forEach(b=>b.classList.toggle('active',b.dataset.sym===s.toUpperCase()));
   pushAlert(`Switched to ${s.toUpperCase()}`,'info');
   doScan(true);
-  // Reload backtest for new symbol
-  if (_btActive) loadBacktest(_btActive, document.querySelector(`#btDayBtns [data-btdate="${_btActive}"]`));
+  // Reset backtest P&L and reload everything for new symbol
+  _btPnLStore = {};
+  setTimeout(initBacktestDays, 100);
 }
 
 function enterTrade() {
@@ -719,18 +727,143 @@ function fmtDayLabel(d) {
   return d.toLocaleDateString('en-GB', {weekday:'short', day:'numeric', month:'short'});
 }
 
-let _btActive = null;
+let _btActive   = null;
+let _btPnLStore = {};   // { dateStr: apiResult }
+
+// ── P&L Calculation ────────────────────────────────────────────────────────
+// Basis: $100 at RISK per trade.
+//   WIN  → +$100 × R:R  (e.g. 3:1 trade = +$300)
+//   LOSS → -$100
+// This mirrors how the strategy is actually traded (fixed risk per entry).
+
+function calcTradePnL(d) {
+  if (!d || !d.signal || !d.outcome) return null;
+  const status = d.status;
+  if (status !== 'WIN' && status !== 'LOSS') return null;
+  const rr = d.signal.risk_reward || 0;
+  return status === 'WIN' ? +(100 * rr).toFixed(2) : -100;
+}
+
+function renderPnLSummary() {
+  const el = document.getElementById('btPnLSummary');
+  if (!el) return;
+
+  const days   = getBacktestDays(10);
+  const loaded = Object.keys(_btPnLStore).length;
+  const total  = days.length;
+
+  // Tally results
+  let trades = 0, wins = 0, losses = 0, noSignal = 0, netPnL = 0;
+
+  days.forEach(d => {
+    const ds   = fmtDate(d);
+    const data = _btPnLStore[ds];
+    if (!data) return;                          // not yet loaded
+
+    const pnl    = calcTradePnL(data);
+    const badge  = document.getElementById(`btPnl_${ds}`);
+
+    if (pnl !== null) {
+      trades++;
+      netPnL += pnl;
+      if (pnl >= 0) wins++; else losses++;
+      if (badge) {
+        badge.textContent = pnl >= 0
+          ? `+$${pnl.toFixed(0)}`
+          : `-$${Math.abs(pnl).toFixed(0)}`;
+        badge.style.color = pnl >= 0 ? 'var(--green)' : 'var(--red)';
+      }
+    } else {
+      noSignal++;
+      if (badge) {
+        const reason = data.status === 'NO_TRADE' ? 'skip' : 'no setup';
+        badge.textContent = reason;
+        badge.style.color = 'var(--text-dim)';
+      }
+    }
+  });
+
+  const totalRisked = trades * 100;
+  const returnPct   = totalRisked > 0 ? (netPnL / totalRisked * 100) : 0;
+  const winRate     = trades > 0 ? (wins / trades * 100) : 0;
+  const isProfit    = netPnL >= 0;
+  const still       = loaded < total;
+  const pnlCol      = isProfit ? 'var(--green)' : 'var(--red)';
+  const pnlSign     = isProfit ? '+' : '';
+
+  el.innerHTML = `
+    <div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;overflow:hidden">
+      <!-- Header bar -->
+      <div style="padding:8px 12px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
+        <span style="font-size:11px;font-weight:700;color:var(--bright)">💰 10-Day P&amp;L — $100 risked per trade</span>
+        ${still ? `<span style="font-size:10px;color:var(--text-dim)"><span class="spinner" style="width:8px;height:8px;border-width:1.5px"></span>&nbsp;${loaded}/${total}</span>` : `<span style="font-size:10px;color:var(--text-dim)">✓ all days loaded</span>`}
+      </div>
+      <!-- Stats grid -->
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:0;text-align:center">
+        <div style="padding:10px 8px;border-right:1px solid var(--border)">
+          <div style="font-size:18px;font-weight:800;color:var(--bright)">${trades}</div>
+          <div style="font-size:9px;text-transform:uppercase;letter-spacing:.06em;color:var(--text-dim);margin-top:2px">Trades taken</div>
+          <div style="font-size:9px;color:var(--text-dim)">${noSignal} no-signal days</div>
+        </div>
+        <div style="padding:10px 8px;border-right:1px solid var(--border)">
+          <div style="font-size:18px;font-weight:800">
+            <span style="color:var(--green)">${wins}W</span>
+            <span style="color:var(--text-dim);font-size:14px"> / </span>
+            <span style="color:var(--red)">${losses}L</span>
+          </div>
+          <div style="font-size:9px;text-transform:uppercase;letter-spacing:.06em;color:var(--text-dim);margin-top:2px">Win / Loss</div>
+          <div style="font-size:9px;color:${winRate>=60?'var(--green)':winRate>=40?'var(--yellow)':'var(--red)'}">${trades>0?winRate.toFixed(0)+'% win rate':'–'}</div>
+        </div>
+        <div style="padding:10px 8px;border-right:1px solid var(--border)">
+          <div style="font-size:18px;font-weight:800;color:var(--text)">$${totalRisked}</div>
+          <div style="font-size:9px;text-transform:uppercase;letter-spacing:.06em;color:var(--text-dim);margin-top:2px">Total risked</div>
+          <div style="font-size:9px;color:var(--text-dim)">$100 × ${trades} trades</div>
+        </div>
+        <div style="padding:10px 8px">
+          <div style="font-size:18px;font-weight:800;color:${pnlCol}">${pnlSign}$${Math.abs(netPnL).toFixed(0)}</div>
+          <div style="font-size:9px;text-transform:uppercase;letter-spacing:.06em;color:var(--text-dim);margin-top:2px">Net P&amp;L</div>
+          <div style="font-size:9px;color:${pnlCol};font-weight:700">${pnlSign}${returnPct.toFixed(1)}% on capital risked</div>
+        </div>
+      </div>
+    </div>`;
+}
+
+async function loadAllPnL(days) {
+  // Stagger requests by 200ms so we don't spike the serverless functions
+  for (let i = 0; i < days.length; i++) {
+    const ds = fmtDate(days[i]);
+    // Skip if already in store (e.g. from the main loadBacktest call)
+    if (_btPnLStore[ds]) { renderPnLSummary(); continue; }
+    setTimeout(async () => {
+      try {
+        const r = await fetch(
+          `/api/backtest?symbol=${encodeURIComponent(LS.sym)}&date=${ds}&account=${LS.acct}&interval=5m`
+        );
+        _btPnLStore[ds] = await r.json();
+      } catch(e) {
+        _btPnLStore[ds] = { status: 'ERROR' };
+      }
+      renderPnLSummary();
+    }, i * 220);
+  }
+}
 
 function initBacktestDays() {
-  const days  = getBacktestDays(10);
-  const el    = document.getElementById('btDayBtns');
+  const days = getBacktestDays(10);
+  const el   = document.getElementById('btDayBtns');
   el.innerHTML = days.map((d, i) => {
     const ds = fmtDate(d);
     return `<button class="sym-btn${i===0?' active':''}" data-btdate="${ds}"
-      onclick="loadBacktest('${ds}',this)">${fmtDayLabel(d)}</button>`;
+      onclick="loadBacktest('${ds}',this)"
+      style="text-align:center;line-height:1.35;padding:5px 9px;min-width:74px">
+      <span style="display:block;font-size:11px">${fmtDayLabel(d)}</span>
+      <span id="btPnl_${ds}" style="display:block;font-size:9px;color:var(--text-dim);margin-top:1px">–</span>
+    </button>`;
   }).join('');
-  // Auto-load the most recent day
   if (days.length) loadBacktest(fmtDate(days[0]), el.querySelector('[data-btdate]'));
+  // Fire off background P&L fetch for all 10 days
+  _btPnLStore = {};
+  loadAllPnL(days);
 }
 
 async function loadBacktest(dateStr, btn) {
@@ -746,6 +879,11 @@ async function loadBacktest(dateStr, btn) {
     const url = `/api/backtest?symbol=${encodeURIComponent(LS.sym)}&date=${dateStr}&account=${LS.acct}&interval=${_btInterval}`;
     const r   = await fetch(url);
     const d   = await r.json();
+    // Seed the P&L store if this was a 5m fetch (same data used for P&L)
+    if (_btInterval === '5m' && !_btPnLStore[dateStr]) {
+      _btPnLStore[dateStr] = d;
+      renderPnLSummary();
+    }
     if (_btActive === dateStr) renderBacktest(d);
   } catch(e) {
     document.getElementById('btLoading').innerHTML =
