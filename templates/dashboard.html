@@ -172,6 +172,21 @@
   .mode-btn  { padding:5px 11px; border-radius:5px; border:1px solid var(--border); background:var(--surface2); color:var(--text-dim); cursor:pointer; font-size:11px; font-weight:700; transition:all .15s; }
   .mode-btn.active { background:var(--blue); color:#fff; border-color:var(--blue); }
   @media(max-width:500px) { .mon-grid { grid-template-columns:1fr 1fr; gap:7px; padding:7px; } }
+
+  /* ── Portfolio backtest table ─────────────────────────────────────────── */
+  .port-table-wrap { overflow-x:auto; border-radius:8px; border:1px solid var(--border); }
+  .port-table { width:100%; border-collapse:collapse; font-size:11px; min-width:720px; }
+  .port-table th { background:var(--bg); color:var(--text-dim); font-size:9px; text-transform:uppercase; letter-spacing:.06em; padding:7px 8px; text-align:center; border-bottom:1px solid var(--border); border-right:1px solid var(--border); white-space:nowrap; font-weight:600; }
+  .port-table th:first-child { text-align:left; }
+  .port-table th:last-child { border-right:none; }
+  .port-table td { padding:7px 8px; text-align:center; border-bottom:1px solid var(--border); border-right:1px solid var(--border); vertical-align:middle; }
+  .port-table td:last-child { border-right:none; }
+  .port-table tr:last-child td { border-bottom:none; }
+  .port-table tbody tr:hover td { background:var(--surface2); }
+  .port-sym { text-align:left!important; font-weight:700; color:var(--bright)!important; font-size:12px; min-width:52px; }
+  .port-total { background:var(--bg)!important; border-left:1px solid var(--border)!important; text-align:center; line-height:1.5; }
+  .port-col-total td { background:var(--bg); font-weight:700; font-size:11px; }
+  .port-grand { background:var(--surface)!important; font-size:13px!important; border-left:2px solid var(--border)!important; }
 </style>
 </head>
 <body>
@@ -354,6 +369,34 @@
 
     </div><!-- /btResult -->
   </div><!-- /backtestSection -->
+
+  <!-- ══════════════════ PORTFOLIO BACKTEST ══════════════════════════════ -->
+  <div id="portfolioSection" class="card" style="flex-shrink:0">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;flex-wrap:wrap;gap:8px">
+      <div>
+        <div class="card-lbl" style="margin-bottom:3px">📊 Portfolio Backtest — All 10 Stocks × 10 Days</div>
+        <div style="font-size:11px;color:var(--text-dim)">$100 risked per trade &nbsp;·&nbsp; WIN = +$100 × R:R &nbsp;·&nbsp; LOSS = −$100</div>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px">
+        <span id="portLoadCounter" style="font-size:10px;color:var(--text-dim)">–</span>
+        <button class="btn btn-gray btn-sm" onclick="loadPortfolioData()">↻ Refresh</button>
+      </div>
+    </div>
+
+    <!-- Summary stats strip -->
+    <div id="portSummary" style="background:var(--bg);border:1px solid var(--border);border-radius:8px;overflow:hidden;margin-bottom:12px">
+      <div style="text-align:center;padding:14px;color:var(--text-dim);font-size:12px">
+        <span class="spinner"></span>&nbsp; Loading portfolio data…
+      </div>
+    </div>
+
+    <!-- Matrix table -->
+    <div class="port-table-wrap" id="portTableWrap">
+      <div style="text-align:center;padding:20px;color:var(--text-dim);font-size:12px">
+        <span class="spinner"></span>&nbsp; Fetching all 100 combinations…
+      </div>
+    </div>
+  </div>
 
 </div><!-- /left -->
 
@@ -1517,6 +1560,208 @@ function monGoToAnalysis(sym) {
   setTimeout(initBacktestDays, 200);
 }
 
+// ─── Portfolio Backtest ───────────────────────────────────────────────────────
+
+const PORT_SYMS   = ['QQQ','SPY','NQ=F','ES=F','AAPL','MSFT','NVDA','TSLA','AMZN','META'];
+const PORT_LABELS = {'NQ=F':'NQ','ES=F':'ES'};
+
+let _portData    = {};   // keyed "SYM|YYYY-MM-DD" → API result
+let _portDays    = [];
+let _portLoaded  = 0;
+let _portTotal   = 0;
+
+function portKey(sym, ds) { return sym + '|' + ds; }
+
+/** Same P&L logic as single-stock — $100 risk basis */
+function calcPortPnL(d) {
+  if (!d || !d.signal || !d.outcome) return null;
+  const st = d.status;
+  if (st !== 'WIN' && st !== 'LOSS') return null;
+  const rr = d.signal.risk_reward || 0;
+  return st === 'WIN' ? +(100 * rr).toFixed(2) : -100;
+}
+
+function loadPortfolioData() {
+  _portDays   = getBacktestDays(10);
+  _portData   = {};
+  _portLoaded = 0;
+  _portTotal  = PORT_SYMS.length * _portDays.length;  // 100
+
+  // Show loading state immediately
+  renderPortfolioTable();
+
+  let idx = 0;
+  for (const sym of PORT_SYMS) {
+    for (const d of _portDays) {
+      const ds  = fmtDate(d);
+      const key = portKey(sym, ds);
+      const i   = idx++;
+      setTimeout(async () => {
+        try {
+          const r = await fetch(
+            `/api/backtest?symbol=${encodeURIComponent(sym)}&date=${ds}&account=100000&interval=5m`
+          );
+          _portData[key] = await r.json();
+        } catch(e) {
+          _portData[key] = { status: 'ERROR' };
+        }
+        _portLoaded++;
+        renderPortfolioTable();
+      }, i * 160);
+    }
+  }
+}
+
+function renderPortfolioTable() {
+  const el     = document.getElementById('portTableWrap');
+  const summEl = document.getElementById('portSummary');
+  const cntEl  = document.getElementById('portLoadCounter');
+  if (!el) return;
+
+  const days = _portDays;
+  if (!days.length) {
+    el.innerHTML = '<div style="text-align:center;padding:16px;color:var(--text-dim);font-size:12px"><span class="spinner"></span>&nbsp; Initialising…</div>';
+    return;
+  }
+
+  // ── Aggregate P&L ──
+  let totTrades = 0, totWins = 0, totLosses = 0, grandPnL = 0;
+  const rowTot = {};   // sym  → { pnl, trades, wins, losses }
+  const colTot = {};   // date → { pnl, trades }
+
+  PORT_SYMS.forEach(s => { rowTot[s] = { pnl:0, trades:0, wins:0, losses:0 }; });
+  days.forEach(d => { colTot[fmtDate(d)] = { pnl:0, trades:0 }; });
+
+  PORT_SYMS.forEach(sym => {
+    days.forEach(d => {
+      const ds  = fmtDate(d);
+      const pnl = calcPortPnL(_portData[portKey(sym, ds)]);
+      if (pnl !== null) {
+        rowTot[sym].pnl    += pnl;
+        rowTot[sym].trades++;
+        colTot[ds].pnl     += pnl;
+        colTot[ds].trades++;
+        grandPnL   += pnl;
+        totTrades++;
+        if (pnl >= 0) { totWins++;   rowTot[sym].wins++;   }
+        else           { totLosses++; rowTot[sym].losses++; }
+      }
+    });
+  });
+
+  const still       = _portLoaded < _portTotal;
+  const winRate     = totTrades > 0 ? (totWins / totTrades * 100) : 0;
+  const totalRisked = totTrades * 100;
+  const retPct      = totalRisked > 0 ? (grandPnL / totalRisked * 100) : 0;
+  const grandCol    = grandPnL >= 0 ? 'var(--green)' : 'var(--red)';
+  const grandSign   = grandPnL >= 0 ? '+' : '';
+
+  // ── Loading counter ──
+  if (cntEl) {
+    cntEl.innerHTML = still
+      ? `<span class="spinner" style="width:8px;height:8px;border-width:1.5px"></span>&nbsp;${_portLoaded}/${_portTotal}`
+      : `<span style="color:var(--green)">✓ ${_portTotal} loaded</span>`;
+  }
+
+  // ── Summary strip ──
+  if (summEl) {
+    summEl.innerHTML = `
+      <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:0;text-align:center">
+        <div style="padding:9px 8px;border-right:1px solid var(--border)">
+          <div style="font-size:17px;font-weight:800;color:var(--bright)">${totTrades}</div>
+          <div style="font-size:9px;text-transform:uppercase;letter-spacing:.06em;color:var(--text-dim);margin-top:2px">Trades taken</div>
+          <div style="font-size:9px;color:var(--text-dim)">${_portTotal - totTrades} no-signal</div>
+        </div>
+        <div style="padding:9px 8px;border-right:1px solid var(--border)">
+          <div style="font-size:17px;font-weight:800">
+            <span style="color:var(--green)">${totWins}W</span>
+            <span style="font-size:13px;color:var(--text-dim)"> / </span>
+            <span style="color:var(--red)">${totLosses}L</span>
+          </div>
+          <div style="font-size:9px;text-transform:uppercase;letter-spacing:.06em;color:var(--text-dim);margin-top:2px">Win / Loss</div>
+        </div>
+        <div style="padding:9px 8px;border-right:1px solid var(--border)">
+          <div style="font-size:17px;font-weight:800;color:${winRate>=60?'var(--green)':winRate>=40?'var(--yellow)':'var(--red)'}">
+            ${totTrades > 0 ? winRate.toFixed(0)+'%' : '–'}
+          </div>
+          <div style="font-size:9px;text-transform:uppercase;letter-spacing:.06em;color:var(--text-dim);margin-top:2px">Win rate</div>
+        </div>
+        <div style="padding:9px 8px;border-right:1px solid var(--border)">
+          <div style="font-size:17px;font-weight:800;color:var(--text)">$${totalRisked}</div>
+          <div style="font-size:9px;text-transform:uppercase;letter-spacing:.06em;color:var(--text-dim);margin-top:2px">Total risked</div>
+          <div style="font-size:9px;color:var(--text-dim)">$100 × ${totTrades}</div>
+        </div>
+        <div style="padding:9px 8px">
+          <div style="font-size:17px;font-weight:800;color:${grandCol}">${grandSign}$${Math.abs(grandPnL).toFixed(0)}</div>
+          <div style="font-size:9px;text-transform:uppercase;letter-spacing:.06em;color:var(--text-dim);margin-top:2px">Net portfolio P&amp;L</div>
+          <div style="font-size:9px;color:${grandCol};font-weight:700">${grandSign}${retPct.toFixed(1)}% on capital risked</div>
+        </div>
+      </div>`;
+  }
+
+  // ── Build table ──
+  const dateCols  = days.map(fmtDate);
+  const dateLabels = days.map(d => d.toLocaleDateString('en-GB', {weekday:'short', day:'numeric', month:'short'}));
+
+  let html = `<table class="port-table">
+    <thead><tr>
+      <th>Stock</th>
+      ${dateLabels.map(l => `<th>${l}</th>`).join('')}
+      <th>10-Day Total</th>
+    </tr></thead>
+    <tbody>`;
+
+  PORT_SYMS.forEach(sym => {
+    const label = PORT_LABELS[sym] || sym;
+    const row   = rowTot[sym];
+    const rCol  = row.trades > 0 ? (row.pnl >= 0 ? 'var(--green)' : 'var(--red)') : 'var(--text-dim)';
+    const rSign = row.pnl >= 0 ? '+' : '';
+
+    html += `<tr><td class="port-sym">${label}</td>`;
+
+    dateCols.forEach(ds => {
+      const data = _portData[portKey(sym, ds)];
+      let cell = '';
+      if (!data) {
+        cell = `<span class="spinner" style="width:8px;height:8px;border-width:1.5px"></span>`;
+      } else {
+        const pnl = calcPortPnL(data);
+        if (pnl !== null) {
+          const c = pnl >= 0 ? 'var(--green)' : 'var(--red)';
+          const s = pnl >= 0 ? '+' : '';
+          cell = `<span style="color:${c};font-weight:700">${s}$${Math.abs(pnl).toFixed(0)}</span>`;
+        } else {
+          const reason = data.status === 'NO_TRADE' ? 'skip'
+                        : data.status === 'ERROR'   ? '⚠'
+                        : '–';
+          cell = `<span style="color:var(--text-dim);font-size:10px">${reason}</span>`;
+        }
+      }
+      html += `<td>${cell}</td>`;
+    });
+
+    html += `<td class="port-total" style="color:${rCol}">
+      ${row.trades > 0
+        ? `<strong>${rSign}$${Math.abs(row.pnl).toFixed(0)}</strong><br>
+           <span style="font-size:9px;color:var(--text-dim)">${row.wins}W / ${row.losses}L</span>`
+        : `<span style="color:var(--text-dim)">–</span>`}
+    </td></tr>`;
+  });
+
+  // ── Column totals row ──
+  html += `<tr class="port-col-total"><td class="port-sym">Day Totals</td>`;
+  dateCols.forEach(ds => {
+    const col  = colTot[ds];
+    const cCol = col.trades > 0 ? (col.pnl >= 0 ? 'var(--green)' : 'var(--red)') : 'var(--text-dim)';
+    const cSign = col.pnl >= 0 ? '+' : '';
+    html += `<td style="color:${cCol}">${col.trades > 0 ? `${cSign}$${Math.abs(col.pnl).toFixed(0)}` : '–'}</td>`;
+  });
+  html += `<td class="port-grand" style="color:${grandCol}">${grandSign}$${Math.abs(grandPnL).toFixed(0)}</td></tr>`;
+
+  html += `</tbody></table>`;
+  el.innerHTML = html;
+}
+
 // ─── Boot ────────────────────────────────────────────────────────────────────
 
 // Populate London-time labels immediately
@@ -1527,6 +1772,9 @@ document.querySelectorAll('.sym-btn').forEach(b=>b.classList.toggle('active',b.d
 
 // Initialise backtest day buttons (after a short delay so main scan loads first)
 setTimeout(initBacktestDays, 400);
+
+// Load portfolio backtest (staggered so it doesn't compete with single-stock backtest)
+setTimeout(loadPortfolioData, 1200);
 
 // Initial scan
 doScan();
