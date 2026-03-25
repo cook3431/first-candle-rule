@@ -1,0 +1,620 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>First Candle Rule</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg:       #080d1a;  --surface:  #0f1629;  --surface2: #162035;
+    --border:   #1e2d4a;  --text:     #c8d4e8;  --text-dim: #5a6a84;
+    --bright:   #eaf0fb;  --green:    #00e09a;  --green-d:  #00734e;
+    --red:      #ff4060;  --red-d:    #7a1f30;  --yellow:   #ffc12b;
+    --yellow-d: #6b4f00;  --blue:     #4d9fff;  --blue-d:   #1a3d6e;
+    --gray:     #3a4a5e;
+  }
+  html,body { height:100%; background:var(--bg); color:var(--text); font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; font-size:14px; }
+  .app { display:grid; grid-template-rows:auto 1fr; height:100vh; min-height:100vh; }
+  .main { display:grid; grid-template-columns:1fr 300px; gap:12px; padding:12px; overflow:hidden; }
+  .left { display:flex; flex-direction:column; gap:12px; overflow-y:auto; }
+  .right { display:flex; flex-direction:column; gap:12px; overflow-y:auto; }
+
+  /* Header */
+  .header { display:flex; align-items:center; gap:10px; flex-wrap:wrap; padding:9px 14px; background:var(--surface); border-bottom:1px solid var(--border); }
+  .logo { font-size:15px; font-weight:700; color:var(--bright); }
+  .logo span { color:var(--yellow); }
+  .spacer { flex:1; }
+  .sym-bar { display:flex; gap:5px; flex-wrap:wrap; }
+  .sym-btn { padding:4px 10px; border-radius:4px; border:1px solid var(--border); background:var(--surface2); color:var(--text-dim); cursor:pointer; font-size:12px; font-weight:600; transition:all .15s; }
+  .sym-btn:hover { border-color:var(--blue); color:var(--blue); }
+  .sym-btn.active { background:var(--blue); color:#fff; border-color:var(--blue); }
+  .sym-input { padding:4px 8px; border-radius:4px; border:1px solid var(--border); background:var(--surface2); color:var(--text); font-size:12px; width:76px; }
+  .btn { padding:7px 16px; border-radius:6px; border:none; cursor:pointer; font-size:12px; font-weight:700; letter-spacing:.04em; transition:all .15s; }
+  .btn-sm { padding:5px 12px; font-size:12px; }
+  .btn-gray { background:var(--surface2); color:var(--text); border:1px solid var(--border); }
+  .btn-gray:hover { background:var(--border); }
+  .btn-green { background:var(--green); color:#000; }
+  .btn-green:hover { filter:brightness(1.1); }
+  .btn-red { background:var(--red); color:#fff; }
+  .btn-red:hover { filter:brightness(1.1); }
+  .btn:disabled { opacity:.4; cursor:default; }
+  .scan-info { font-size:11px; color:var(--text-dim); }
+
+  /* Phase strip */
+  .phases { display:flex; background:var(--surface); border-radius:8px; overflow:hidden; border:1px solid var(--border); flex-shrink:0; }
+  .phase { flex:1; padding:7px 4px; text-align:center; font-size:10px; color:var(--text-dim); border-right:1px solid var(--border); }
+  .phase:last-child { border-right:none; }
+  .phase.active { background:var(--blue-d); color:var(--blue); font-weight:700; box-shadow:inset 0 -2px 0 var(--blue); }
+  .phase.done { color:var(--green-d); }
+
+  /* Signal card */
+  .sig-card { border-radius:10px; padding:22px; border:1px solid var(--border); background:var(--surface); flex-shrink:0; transition:background .3s,border-color .3s; }
+  .sig-card.c-wait    { background:var(--surface); border-color:var(--border); }
+  .sig-card.c-watch   { background:#1a1600; border-color:var(--yellow-d); }
+  .sig-card.c-long    { background:#001a10; border-color:var(--green-d); }
+  .sig-card.c-short   { background:#1a000a; border-color:var(--red-d); }
+  .sig-card.c-intrade { border-width:2px; }
+  .sig-card.c-skip    { background:var(--surface); border-color:var(--gray); }
+
+  .badge { display:inline-flex; align-items:center; gap:6px; padding:4px 12px; border-radius:20px; font-size:11px; font-weight:700; letter-spacing:.07em; text-transform:uppercase; margin-bottom:12px; }
+  .b-wait  { background:var(--gray);    color:#fff; }
+  .b-watch { background:var(--yellow-d);color:var(--yellow); }
+  .b-long  { background:var(--green-d); color:var(--green); }
+  .b-short { background:var(--red-d);   color:var(--red); }
+  .b-skip  { background:var(--gray);    color:var(--text-dim); }
+  .pulse { animation:pulse 2s infinite; }
+  @keyframes pulse { 0%,100%{opacity:1}50%{opacity:.55} }
+
+  .headline { font-size:30px; font-weight:800; letter-spacing:-.02em; color:var(--bright); line-height:1.1; margin-bottom:4px; }
+  .headline.c-green  { color:var(--green); }
+  .headline.c-red    { color:var(--red); }
+  .headline.c-yellow { color:var(--yellow); }
+  .headline.c-dim    { color:var(--text-dim); font-size:22px; }
+  .subline { font-size:12px; color:var(--text-dim); margin-bottom:18px; }
+
+  /* Levels */
+  .levels { display:grid; grid-template-columns:repeat(4,1fr); gap:8px; margin-bottom:14px; }
+  .lbox { background:var(--bg); border:1px solid var(--border); border-radius:8px; padding:9px 11px; }
+  .lbl  { font-size:10px; text-transform:uppercase; letter-spacing:.07em; color:var(--text-dim); margin-bottom:3px; }
+  .val  { font-size:19px; font-weight:700; color:var(--bright); }
+  .val.g { color:var(--green); }
+  .val.r { color:var(--red); }
+  .val.y { color:var(--yellow); }
+  .sub  { font-size:10px; color:var(--text-dim); margin-top:2px; }
+  .size-box { background:var(--bg); border:1px solid var(--border); border-radius:8px; padding:9px 12px; margin-bottom:14px; }
+
+  /* Price bar */
+  .bar-wrap { margin-bottom:16px; }
+  .bar-head { display:flex; justify-content:space-between; font-size:10px; color:var(--text-dim); margin-bottom:5px; }
+  .bar-track { height:8px; background:var(--surface2); border-radius:4px; position:relative; overflow:visible; }
+  .bar-fill { height:100%; border-radius:4px; background:linear-gradient(90deg,var(--red),var(--yellow),var(--green)); transition:width .5s; min-width:3px; }
+  .bar-entry { position:absolute; top:-4px; width:2px; height:16px; background:var(--blue); border-radius:1px; transform:translateX(-50%); }
+  .bar-entry::after { content:'Entry'; position:absolute; top:-15px; left:50%; transform:translateX(-50%); font-size:9px; color:var(--blue); white-space:nowrap; }
+  .bar-dot { position:absolute; top:-5px; width:18px; height:18px; background:#fff; border-radius:50%; transform:translateX(-50%); border:2px solid var(--bright); box-shadow:0 0 8px rgba(255,255,255,.35); transition:left .5s; }
+  .bar-dot::after { content:attr(data-p); position:absolute; top:20px; left:50%; transform:translateX(-50%); font-size:10px; color:var(--bright); font-weight:700; white-space:nowrap; }
+  .bar-foot { display:flex; justify-content:space-between; font-size:10px; color:var(--text-dim); margin-top:14px; }
+
+  /* Action box */
+  .action { border-radius:8px; padding:13px 15px; margin-bottom:12px; border-left:4px solid; }
+  .a-high    { background:#1a0d00; border-color:var(--yellow); }
+  .a-success { background:#001a10; border-color:var(--green); }
+  .a-info    { background:var(--surface2); border-color:var(--blue); }
+  .a-danger  { background:#1a0008; border-color:var(--red); }
+  .action-t  { font-size:13px; font-weight:700; color:var(--bright); margin-bottom:3px; }
+  .action-s  { font-size:12px; color:var(--text-dim); }
+
+  .trade-btns { display:flex; gap:8px; margin-top:14px; }
+
+  /* Range + stats */
+  .range-card { background:var(--surface); border:1px solid var(--border); border-radius:10px; padding:13px 15px; }
+  .card-lbl { font-size:10px; text-transform:uppercase; letter-spacing:.07em; color:var(--text-dim); margin-bottom:10px; }
+  .range-row { display:flex; gap:20px; align-items:center; flex-wrap:wrap; }
+  .ritem .rl { font-size:10px; text-transform:uppercase; letter-spacing:.06em; color:var(--text-dim); }
+  .ritem .rv { font-size:16px; font-weight:700; color:var(--bright); }
+  .ritem .rv.g { color:var(--green); } .ritem .rv.r { color:var(--red); } .ritem .rv.y { color:var(--yellow); }
+  .rsep { color:var(--border); font-size:18px; }
+
+  .stats3 { display:grid; grid-template-columns:repeat(3,1fr); gap:8px; }
+  .stat { background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:10px; text-align:center; }
+  .sv { font-size:17px; font-weight:700; color:var(--bright); }
+  .sl { font-size:10px; color:var(--text-dim); margin-top:2px; }
+
+  /* Card */
+  .card { background:var(--surface); border:1px solid var(--border); border-radius:10px; padding:14px; }
+
+  /* Alerts */
+  .alerts { display:flex; flex-direction:column; gap:5px; overflow-y:auto; max-height:380px; }
+  .al { display:flex; gap:7px; padding:7px 9px; border-radius:6px; background:var(--bg); font-size:12px; }
+  .at { color:var(--text-dim); white-space:nowrap; font-size:10px; padding-top:1px; flex-shrink:0; }
+  .am { color:var(--text); line-height:1.4; }
+  .al.success .am { color:var(--green); }
+  .al.danger  .am { color:var(--red); }
+  .al.warning .am { color:var(--yellow); }
+
+  /* Spinner / live dot */
+  .spinner { display:inline-block; width:10px; height:10px; border:2px solid var(--border); border-top-color:var(--blue); border-radius:50%; animation:spin .6s linear infinite; }
+  @keyframes spin { to{ transform:rotate(360deg); } }
+  .live-dot { width:7px; height:7px; border-radius:50%; background:var(--green); display:inline-block; animation:blink 2s infinite; }
+  @keyframes blink { 0%,100%{opacity:1}50%{opacity:.3} }
+
+  /* Flash */
+  @keyframes flash-g { 0%{box-shadow:0 0 0 0 rgba(0,224,154,.7)} 70%{box-shadow:0 0 0 22px rgba(0,224,154,0)} 100%{box-shadow:0 0 0 0 rgba(0,224,154,0)} }
+  @keyframes flash-r { 0%{box-shadow:0 0 0 0 rgba(255,64,96,.7)}  70%{box-shadow:0 0 0 22px rgba(255,64,96,0)}  100%{box-shadow:0 0 0 0 rgba(255,64,96,0)} }
+  .fx-g { animation:flash-g 1s 3; }
+  .fx-r { animation:flash-r 1s 3; }
+
+  /* Responsive */
+  @media(max-width:680px) {
+    .main { grid-template-columns:1fr; }
+    .right { display:none; }
+    .levels { grid-template-columns:repeat(2,1fr); }
+    .headline { font-size:22px; }
+  }
+</style>
+</head>
+<body>
+<div class="app">
+
+<!-- HEADER -->
+<div class="header">
+  <div class="logo">🕯 <span>FIRST CANDLE</span> RULE</div>
+  <div class="sym-bar">
+    <button class="sym-btn active" data-sym="QQQ"  onclick="setSym('QQQ')">QQQ</button>
+    <button class="sym-btn"        data-sym="SPY"  onclick="setSym('SPY')">SPY</button>
+    <button class="sym-btn"        data-sym="NQ=F" onclick="setSym('NQ=F')">NQ</button>
+    <button class="sym-btn"        data-sym="ES=F" onclick="setSym('ES=F')">ES</button>
+    <input  class="sym-input" id="customSym" placeholder="AAPL…"
+            onkeydown="if(event.key==='Enter')setSym(this.value.trim().toUpperCase())">
+  </div>
+  <div class="spacer"></div>
+  <span class="scan-info" id="scanInfo">–</span>
+  <button class="btn btn-gray btn-sm" id="rfBtn" onclick="refresh()">↻ Refresh</button>
+</div>
+
+<!-- MAIN -->
+<div class="main">
+<div class="left">
+
+  <!-- Phase strip -->
+  <div class="phases">
+    <div class="phase" id="ph0">Pre-Market</div>
+    <div class="phase" id="ph1">First Candle</div>
+    <div class="phase active" id="ph2">AM Kill Zone</div>
+    <div class="phase" id="ph3">Mid Session</div>
+    <div class="phase" id="ph4">PM Kill Zone</div>
+    <div class="phase" id="ph5">Done</div>
+  </div>
+
+  <!-- Signal card -->
+  <div class="sig-card" id="sigCard">
+    <div class="badge b-wait" id="badge">⏳ Connecting…</div>
+    <div class="headline c-dim" id="headline">Loading market data…</div>
+    <div class="subline" id="subline"></div>
+
+    <!-- Levels (shown on SIGNAL) -->
+    <div id="levelsSec" style="display:none">
+      <div class="levels">
+        <div class="lbox"><div class="lbl">Entry</div><div class="val" id="lEntry">–</div><div class="sub">Limit order</div></div>
+        <div class="lbox"><div class="lbl">Stop Loss</div><div class="val r" id="lSL">–</div><div class="sub" id="lSLSub">Hard stop</div></div>
+        <div class="lbox"><div class="lbl">Take Profit</div><div class="val g" id="lTP">–</div><div class="sub" id="lTPSub">Target</div></div>
+        <div class="lbox"><div class="lbl">R:R Ratio</div><div class="val y" id="lRR">–</div><div class="sub">Risk/reward</div></div>
+      </div>
+      <div class="size-box"><div class="lbl">Position Size (1% risk)</div><div class="val" id="lSize" style="font-size:15px">–</div></div>
+
+      <!-- Price bar -->
+      <div class="bar-wrap" id="barWrap" style="display:none">
+        <div class="bar-head">
+          <span id="bLeft">SL</span>
+          <span style="color:var(--bright);font-weight:600" id="bPct">–</span>
+          <span id="bRight">TP</span>
+        </div>
+        <div class="bar-track">
+          <div class="bar-fill"  id="bFill"  style="width:0%"></div>
+          <div class="bar-entry" id="bEntry" style="left:0%"></div>
+          <div class="bar-dot"   id="bDot"   data-p="" style="left:0%"></div>
+        </div>
+        <div class="bar-foot"><span id="bSL">–</span><span id="bTP">–</span></div>
+      </div>
+
+      <!-- Action advice -->
+      <div id="actionBox"></div>
+
+      <!-- Buttons -->
+      <div class="trade-btns" id="tradeBtns">
+        <button class="btn btn-green" id="enterBtn" onclick="enterTrade()">✓ I'M IN THE TRADE</button>
+        <button class="btn btn-red"   id="exitBtn"  onclick="exitTrade()" style="display:none">✗ CLOSE TRADE</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- First candle range -->
+  <div class="range-card" id="rangeCard" style="display:none">
+    <div class="card-lbl">First Candle Range — 09:30–10:00 EST</div>
+    <div class="range-row">
+      <div class="ritem"><div class="rl">High</div><div class="rv g" id="fcH">–</div></div>
+      <div class="rsep">|</div>
+      <div class="ritem"><div class="rl">Low</div><div class="rv r" id="fcL">–</div></div>
+      <div class="rsep">|</div>
+      <div class="ritem"><div class="rl">Range</div><div class="rv" id="fcR">–</div></div>
+      <div class="rsep">|</div>
+      <div class="ritem"><div class="rl">Current</div><div class="rv y" id="curP">–</div></div>
+    </div>
+  </div>
+
+  <!-- Stats -->
+  <div class="stats3" id="statsRow" style="display:none">
+    <div class="stat"><div class="sv" id="sBias">–</div><div class="sl">Daily Bias</div></div>
+    <div class="stat"><div class="sv" id="sPDH">–</div><div class="sl">PDH — resistance</div></div>
+    <div class="stat"><div class="sv" id="sPDL">–</div><div class="sl">PDL — support</div></div>
+  </div>
+
+</div><!-- /left -->
+
+<!-- RIGHT: alert feed + rules -->
+<div class="right">
+  <div class="card" style="flex:1;display:flex;flex-direction:column">
+    <div class="card-lbl" style="display:flex;justify-content:space-between;align-items:center">
+      <span>Activity Feed</span>
+      <span id="liveInd" style="display:flex;align-items:center;gap:5px;font-size:11px;color:var(--text-dim)">
+        <span class="live-dot"></span> live
+      </span>
+    </div>
+    <div class="alerts" id="alertList">
+      <div class="al"><span class="at">–</span><span class="am" style="color:var(--text-dim)">Waiting for first scan…</span></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-lbl">Daily Rules</div>
+    <div style="display:flex;flex-direction:column;gap:6px;font-size:12px;color:var(--text-dim)">
+      <div>🚫 No trades on <strong style="color:var(--text)">Mondays</strong></div>
+      <div>✅ Only enter on a <strong style="color:var(--text)">scanner signal</strong></div>
+      <div>🛑 <strong style="color:var(--text)">1 win</strong> → done for the day</div>
+      <div>🛑 <strong style="color:var(--text)">2 losses</strong> → done for the day</div>
+      <div>⏰ No entries after <strong style="color:var(--text)">3:00 PM EST</strong></div>
+      <div>🙅 Never widen your stop loss</div>
+      <div>🙅 Set levels, then walk away</div>
+    </div>
+  </div>
+</div>
+
+</div><!-- /main -->
+</div><!-- /app -->
+
+<script>
+// ─── Persistent client-side state (survives page reload) ─────────────────────
+const LS = {
+  get sym()     { return localStorage.getItem('sym')     || 'QQQ'; },
+  set sym(v)    { localStorage.setItem('sym', v); },
+  get acct()    { return parseInt(localStorage.getItem('acct') || '100000'); },
+  set acct(v)   { localStorage.setItem('acct', String(v)); },
+  get inTrade() { return localStorage.getItem('inTrade') === 'true'; },
+  set inTrade(v){ localStorage.setItem('inTrade', String(v)); },
+  get signal()  { try{ return JSON.parse(localStorage.getItem('signal') || 'null'); }catch{ return null; } },
+  set signal(v) { localStorage.setItem('signal', JSON.stringify(v)); },
+};
+
+// Alerts live in sessionStorage (cleared when tab closes)
+function getAlerts() { try { return JSON.parse(sessionStorage.getItem('alerts')||'[]'); } catch{ return []; } }
+function saveAlerts(a){ sessionStorage.setItem('alerts', JSON.stringify(a.slice(0,60))); }
+function pushAlert(msg, level='info') {
+  const alerts = getAlerts();
+  alerts.unshift({ t: new Date().toLocaleTimeString('en-US',{hour12:false,hour:'2-digit',minute:'2-digit',second:'2-digit'}), msg, level });
+  saveAlerts(alerts);
+  renderAlerts(alerts);
+}
+
+// ─── Audio ───────────────────────────────────────────────────────────────────
+let _ctx = null;
+function beep(type) {
+  try {
+    if (!_ctx) _ctx = new (window.AudioContext||window.webkitAudioContext)();
+    const freqs = type === 'buy' ? [440,554,659] : [659,554,440];
+    freqs.forEach((f,i) => {
+      const o = _ctx.createOscillator(), g = _ctx.createGain();
+      o.connect(g); g.connect(_ctx.destination);
+      o.frequency.value = f; o.type = 'sine';
+      const t = _ctx.currentTime + i*.13;
+      g.gain.setValueAtTime(.3, t);
+      g.gain.exponentialRampToValueAtTime(.001, t+.3);
+      o.start(t); o.stop(t+.35);
+    });
+  } catch(e){}
+}
+
+// ─── Trade management advice ─────────────────────────────────────────────────
+function tradeAdvice(sig, price, inTrade) {
+  const { direction:dir, entry, stop_loss:sl, take_profit:tp } = sig;
+  const risk   = Math.abs(entry - sl);
+  const reward = Math.abs(tp - entry);
+
+  let pctTP = 0, pctSL = 0, barPct = 0;
+  const entryPct = risk / (risk + reward) * 100;
+
+  if (price) {
+    if (dir === 'LONG') {
+      pctTP  = price > entry ? Math.min(100,(price-entry)/reward*100) : 0;
+      pctSL  = price < entry ? Math.min(100,(entry-price)/risk*100)   : 0;
+      barPct = Math.max(0,Math.min(100,(price-sl)/(tp-sl)*100));
+    } else {
+      pctTP  = price < entry ? Math.min(100,(entry-price)/reward*100) : 0;
+      pctSL  = price > entry ? Math.min(100,(price-entry)/risk*100)   : 0;
+      barPct = Math.max(0,Math.min(100,(sl-price)/(sl-tp)*100));
+    }
+  }
+
+  let advice;
+  if (!inTrade) {
+    const act = dir === 'LONG' ? 'LIMIT BUY' : 'LIMIT SELL (SHORT)';
+    advice = { cls:'a-high', title:`Place ${act} at ${entry.toFixed(2)}`, sub:`Then set Stop Loss → ${sl.toFixed(2)}   Take Profit → ${tp.toFixed(2)}` };
+  } else if (pctTP >= 100) {
+    advice = { cls:'a-success', title:'🎯 TARGET REACHED — close the trade', sub:'Your take profit should have triggered. If still open, close now.' };
+  } else if (pctTP >= 75) {
+    const lock = dir === 'LONG' ? (entry+risk*.5).toFixed(2) : (entry-risk*.5).toFixed(2);
+    advice = { cls:'a-success', title:`🔒 Move SL to +0.5R → ${lock}`, sub:`${pctTP.toFixed(0)}% to target. Lock in half your profit by moving stop to ${lock}.` };
+  } else if (pctTP >= 50) {
+    advice = { cls:'a-high', title:`⬆ Move SL to Breakeven → ${entry.toFixed(2)}`, sub:`${pctTP.toFixed(0)}% to target. Move stop to entry — worst case you break even from here.` };
+  } else if (pctSL >= 80) {
+    advice = { cls:'a-danger', title:`⚠ Approaching stop loss`, sub:`${pctSL.toFixed(0)}% of the way to SL at ${sl.toFixed(2)}. Do NOT widen it. Let it play out.` };
+  } else if (pctSL >= 50) {
+    advice = { cls:'a-danger', title:'Price moving against position', sub:`Stop at ${sl.toFixed(2)} will protect you. Stay the course.` };
+  } else {
+    advice = { cls:'a-info', title:`Holding — ${pctTP.toFixed(0)}% to target`, sub:'Levels are set. No action needed. Do not watch this trade.' };
+  }
+  return { advice, pctTP, barPct, entryPct };
+}
+
+// ─── Render ───────────────────────────────────────────────────────────────────
+let prevStatus = null;
+
+function render(data) {
+  if (!data) return;
+  const status = data.status || 'WAITING';
+  const price  = data.current_price;
+  const inTrade = LS.inTrade;
+
+  // If we just got a SIGNAL, save it so it persists across polls
+  if (status === 'SIGNAL') LS.signal = data;
+  // If scanning returned non-signal and we're NOT in a trade, clear saved signal
+  if (status !== 'SIGNAL' && !inTrade) LS.signal = null;
+
+  // Use saved signal if we're in a trade but current scan lost it (e.g. after AM kill zone)
+  const sig = (status === 'SIGNAL') ? data : (inTrade ? LS.signal : null);
+
+  // Scan time
+  if (data.scan_time) document.getElementById('scanInfo').textContent = `Last scan: ${data.scan_time}`;
+
+  // Current price
+  if (price) document.getElementById('curP').textContent = price.toFixed(2);
+
+  // Phase strip
+  ['ph0','ph1','ph2','ph3','ph4','ph5'].forEach(id => document.getElementById(id).classList.remove('active','done'));
+  const phMap = {PRE_MARKET:'ph0',FIRST_CANDLE:'ph1',AM_KILL_ZONE:'ph2',MID_SESSION:'ph3',PM_KILL_ZONE:'ph4',DONE:'ph5',CLOSED:'ph5'};
+  const ph = phMap[data.phase] || 'ph0';
+  document.getElementById(ph)?.classList.add('active');
+
+  // First candle range
+  const fc = data.first_candle;
+  if (fc) {
+    document.getElementById('rangeCard').style.display='';
+    document.getElementById('fcH').textContent=(fc.high||0).toFixed(2);
+    document.getElementById('fcL').textContent=(fc.low||0).toFixed(2);
+    document.getElementById('fcR').textContent=((fc.high||0)-(fc.low||0)).toFixed(2)+' pts';
+  }
+
+  // Stats
+  if (data.bias && data.bias !== 'NONE') {
+    document.getElementById('statsRow').style.display='';
+    const bEl = document.getElementById('sBias');
+    bEl.textContent = data.bias==='LONG'?'▲ LONG':data.bias==='SHORT'?'▼ SHORT':'— NONE';
+    bEl.style.color = data.bias==='LONG'?'var(--green)':data.bias==='SHORT'?'var(--red)':'var(--text-dim)';
+    if (fc) { document.getElementById('sPDH').textContent=(fc.high||0).toFixed(2); document.getElementById('sPDL').textContent=(fc.low||0).toFixed(2); }
+  }
+
+  // New signal alert
+  if (status==='SIGNAL' && prevStatus!=='SIGNAL') {
+    const d=data.direction,e=data.entry;
+    beep(d==='LONG'?'buy':'sell');
+    document.getElementById('sigCard').classList.add(d==='LONG'?'fx-g':'fx-r');
+    setTimeout(()=>document.getElementById('sigCard').classList.remove('fx-g','fx-r'),3500);
+    pushAlert(`SIGNAL: ${d} ${data.symbol} @ ${(e||0).toFixed(2)} | SL ${(data.stop_loss||0).toFixed(2)} | TP ${(data.take_profit||0).toFixed(2)} | R:R ${(data.risk_reward||0).toFixed(1)}`, d==='LONG'?'success':'danger');
+    if (Notification.permission==='granted') new Notification(`${d==='LONG'?'▲ BUY':'▼ SELL'} ${data.symbol}`,{body:`Entry ${(e||0).toFixed(2)} | SL ${(data.stop_loss||0).toFixed(2)} | TP ${(data.take_profit||0).toFixed(2)}`});
+  }
+  prevStatus = status;
+
+  // ── Signal card ──
+  const card = document.getElementById('sigCard');
+  const lvSec = document.getElementById('levelsSec');
+  card.className = 'sig-card';
+  lvSec.style.display = 'none';
+  document.getElementById('tradeBtns').style.display='none';
+
+  if (sig && (status==='SIGNAL' || inTrade)) {
+    const isLong = sig.direction==='LONG';
+    card.classList.add(inTrade?'c-intrade':(isLong?'c-long':'c-short'));
+    const badge=document.getElementById('badge');
+    badge.className=`badge ${isLong?'b-long pulse':'b-short pulse'}`;
+    badge.textContent=inTrade?(isLong?'▲ LONG — IN TRADE':'▼ SHORT — IN TRADE'):(isLong?'▲ SIGNAL: BUY':'▼ SIGNAL: SELL');
+    const hl=document.getElementById('headline');
+    hl.className=`headline ${isLong?'c-green':'c-red'}`;
+    hl.textContent=isLong?`BUY ${sig.symbol||LS.sym}`:`SELL ${sig.symbol||LS.sym}`;
+    document.getElementById('subline').textContent=inTrade?'Position active — follow the instructions below':'Setup confirmed — place your limit order now';
+
+    // Levels
+    lvSec.style.display='';
+    document.getElementById('lEntry').textContent=(sig.entry||0).toFixed(2);
+    document.getElementById('lSL').textContent=(sig.stop_loss||0).toFixed(2);
+    document.getElementById('lTP').textContent=(sig.take_profit||0).toFixed(2);
+    document.getElementById('lRR').textContent=(sig.risk_reward||0).toFixed(1)+':1';
+    document.getElementById('lSLSub').textContent=isLong?'Below first candle low':'Above first candle high';
+    document.getElementById('lTPSub').textContent=`+${Math.abs((sig.take_profit||0)-(sig.entry||0)).toFixed(2)} pts`;
+    // Size
+    const rp=Math.abs((sig.entry||0)-(sig.stop_loss||0));
+    const isFut=LS.sym.endsWith('=F');
+    const ptV=LS.sym==='NQ=F'?20:LS.sym==='ES=F'?50:LS.sym==='MNQ=F'?2:LS.sym==='MES=F'?5:1;
+    const rpu=isFut?rp*ptV:rp;
+    const units=rpu>0?Math.max(1,Math.floor(LS.acct*.01/rpu)):1;
+    document.getElementById('lSize').textContent=`${units} ${isFut?'contract(s)':'shares'}  (1% of $${LS.acct.toLocaleString()})`;
+
+    // Price bar + advice
+    const mg=tradeAdvice(sig,price,inTrade);
+    if (price) {
+      document.getElementById('barWrap').style.display='';
+      document.getElementById('bFill').style.width=mg.barPct.toFixed(1)+'%';
+      document.getElementById('bEntry').style.left=mg.entryPct.toFixed(1)+'%';
+      document.getElementById('bDot').style.left=mg.barPct.toFixed(1)+'%';
+      document.getElementById('bDot').dataset.p=price.toFixed(2);
+      document.getElementById('bSL').textContent=(sig.stop_loss||0).toFixed(2);
+      document.getElementById('bTP').textContent=(sig.take_profit||0).toFixed(2);
+      const pct=mg.pctTP;
+      document.getElementById('bPct').textContent=pct>=100?'✅ TARGET HIT':pct>0?`${pct.toFixed(0)}% to target`:'Waiting for fill / move';
+      document.getElementById('bLeft').textContent=isLong?'SL ←':'← TP';
+      document.getElementById('bRight').textContent=isLong?'→ TP':'SL →';
+    }
+    const a=mg.advice;
+    document.getElementById('actionBox').innerHTML=`<div class="action ${a.cls}"><div class="action-t">${a.title}</div><div class="action-s">${a.sub}</div></div>`;
+
+    document.getElementById('tradeBtns').style.display='flex';
+    document.getElementById('enterBtn').style.display=inTrade?'none':'';
+    document.getElementById('exitBtn').style.display=inTrade?'':'none';
+
+  } else if (status==='NO_SIGNAL'||status==='WAITING') {
+    card.classList.add(data.displacement?'c-watch':'c-wait');
+    const badge=document.getElementById('badge');
+    const reason=data.reason||'';
+    if (reason.includes('forming')||reason.includes('First candle')) {
+      badge.className='badge b-wait pulse'; badge.textContent='🕯 First Candle Forming';
+      document.getElementById('headline').className='headline c-yellow';
+      document.getElementById('headline').textContent='DO NOT TRADE';
+      document.getElementById('subline').textContent='First candle closes at 10:00 EST — observe only.';
+    } else if (reason.includes('Pre-market')||reason.includes('pre')) {
+      badge.className='badge b-wait'; badge.textContent='⏳ Pre-Market';
+      document.getElementById('headline').className='headline c-dim';
+      document.getElementById('headline').textContent='Market opens at 09:30 EST';
+      document.getElementById('subline').textContent=data.bias&&data.bias!=='NONE'?`Bias: ${data.bias==='LONG'?'▲ LONG':'▼ SHORT'} — prepare to watch.`:'';
+    } else if (data.displacement) {
+      badge.className='badge b-watch pulse'; badge.textContent='👁 Displacement — Watching';
+      document.getElementById('headline').className='headline c-yellow';
+      document.getElementById('headline').textContent='Setup Developing…';
+      document.getElementById('subline').textContent='Displacement confirmed — waiting for FVG back in range.';
+    } else {
+      badge.className='badge b-wait'; badge.textContent='⏳ Watching Market';
+      document.getElementById('headline').className='headline c-dim';
+      document.getElementById('headline').textContent='No Setup Yet';
+      document.getElementById('subline').textContent='Watching for a displacement break of the first candle range.';
+    }
+  } else if (status==='NO_TRADE') {
+    card.classList.add('c-skip');
+    document.getElementById('badge').className='badge b-skip';
+    document.getElementById('badge').textContent='🚫 No Trade Today';
+    document.getElementById('headline').className='headline c-dim';
+    document.getElementById('headline').textContent=data.reason||'Skipping today';
+    document.getElementById('subline').textContent='No edge today. Come back tomorrow. Flat is a position.';
+  } else if (status==='DONE'||status==='CLOSED') {
+    card.classList.add('c-skip');
+    document.getElementById('badge').className='badge b-skip';
+    document.getElementById('badge').textContent=status==='CLOSED'?'📅 Weekend':'✅ Session Complete';
+    document.getElementById('headline').className='headline c-dim';
+    document.getElementById('headline').textContent=status==='CLOSED'?'Market Closed':'Done For Today';
+    document.getElementById('subline').textContent=status==='CLOSED'?'Come back on Tuesday.':'No more new trades after 3:00 PM EST.';
+  } else {
+    card.classList.add('c-wait');
+    document.getElementById('badge').className='badge b-wait';
+    document.getElementById('badge').textContent='⏳ Loading…';
+    document.getElementById('headline').className='headline c-dim';
+    document.getElementById('headline').textContent='Fetching market data…';
+    document.getElementById('subline').textContent='';
+  }
+
+  renderAlerts(getAlerts());
+}
+
+function renderAlerts(alerts) {
+  const el=document.getElementById('alertList');
+  if (!alerts.length) { el.innerHTML='<div class="al"><span class="at">–</span><span class="am" style="color:var(--text-dim)">No activity yet</span></div>'; return; }
+  el.innerHTML=alerts.map(a=>`<div class="al ${a.level||'info'}"><span class="at">${a.t}</span><span class="am">${a.msg}</span></div>`).join('');
+}
+
+// ─── API ─────────────────────────────────────────────────────────────────────
+let scanning = false;
+
+async function doScan(bust=false) {
+  if (scanning) return;
+  scanning = true;
+  const btn=document.getElementById('rfBtn');
+  btn.textContent='Scanning…'; btn.disabled=true;
+  try {
+    const ts = bust ? `&_t=${Date.now()}` : '';
+    const url = `/api/scan?symbol=${encodeURIComponent(LS.sym)}&account=${LS.acct}${ts}`;
+    const r = await fetch(url, bust ? {cache:'reload'} : {});
+    const d = await r.json();
+    render(d);
+  } catch(e) {
+    document.getElementById('subline').textContent='Network error — retrying…';
+    pushAlert('Network error: '+e.message,'warning');
+  } finally {
+    scanning=false; btn.textContent='↻ Refresh'; btn.disabled=false;
+  }
+}
+
+function refresh() { doScan(true); }
+
+function setSym(s) {
+  if (!s) return;
+  LS.sym=s.toUpperCase();
+  LS.inTrade=false; LS.signal=null;
+  document.querySelectorAll('.sym-btn').forEach(b=>b.classList.toggle('active',b.dataset.sym===s.toUpperCase()));
+  pushAlert(`Switched to ${s.toUpperCase()}`,'info');
+  doScan(true);
+}
+
+function enterTrade() {
+  LS.inTrade=true;
+  pushAlert('Trade marked ACTIVE — watching SL/TP levels','success');
+  if(Notification.permission==='default') Notification.requestPermission();
+  render(Object.assign({},LS.signal||{},{current_price:null}));
+  doScan(true);
+}
+function exitTrade() {
+  if(!confirm('Mark this trade as closed and reset the scanner?')) return;
+  LS.inTrade=false; LS.signal=null;
+  pushAlert('Trade closed — scanner reset','info');
+  doScan(true);
+}
+
+// ─── Clock ───────────────────────────────────────────────────────────────────
+function tick() {
+  const n=new Date();
+  const t=n.toLocaleTimeString('en-US',{timeZone:'America/New_York',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false});
+  document.getElementById('liveInd').innerHTML=`<span class="live-dot"></span> ${t} EST`;
+}
+setInterval(tick,1000); tick();
+
+// ─── Boot ────────────────────────────────────────────────────────────────────
+
+// Restore symbol button state
+document.querySelectorAll('.sym-btn').forEach(b=>b.classList.toggle('active',b.dataset.sym===LS.sym));
+
+// Initial scan
+doScan();
+
+// Auto-poll every 60 s
+setInterval(()=>doScan(false), 60_000);
+
+// If in trade, also update price every 30 s
+setInterval(async()=>{
+  if(!LS.inTrade) return;
+  try {
+    const r=await fetch(`/api/price?symbol=${encodeURIComponent(LS.sym)}`);
+    const d=await r.json();
+    if(d.price) {
+      document.getElementById('curP').textContent=d.price.toFixed(2);
+      const sig=LS.signal;
+      if(sig) render(Object.assign({},sig,{current_price:d.price}));
+    }
+  } catch(e){}
+}, 30_000);
+</script>
+</body>
+</html>

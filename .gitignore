@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.env
+.vercel
+venv/
+.venv/
+trade_journal.json
+trading_log.json
