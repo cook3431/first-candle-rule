@@ -508,6 +508,7 @@ def scan(symbol: str, verbose: bool = False, account_size: float = 100_000.0) ->
             "phase": phase.name,
             "first_candle": {"high": fc.high, "low": fc.low},
             "fvg": {"top": signal.fvg.top, "bottom": signal.fvg.bottom} if signal.fvg else None,
+            "confidence": _confidence_to_dict(signal.confidence),
         }
 
     else:
@@ -614,6 +615,23 @@ def run_backtest_day(symbol: str, target_date_str: str, account_size: float = 10
     def _to_unix(ny_naive):
         ny_aware = EST.localize(ny_naive) if ny_naive.tzinfo is None else ny_naive.astimezone(EST)
         return int(ny_aware.timestamp())
+
+    def _confidence_to_dict(confidence) -> dict:
+        """Serialise a ConfidenceScore to a JSON-safe dict. Returns {} if None."""
+        if confidence is None:
+            return {}
+        return {
+            "grade":                confidence.grade.value,
+            "score":                confidence.score,
+            "fvg_quality":          confidence.fvg_quality,
+            "displacement_quality": round(confidence.displacement_quality, 2),
+            "bias_strength":        round(confidence.bias_strength, 2),
+            "in_kill_zone":         confidence.in_kill_zone,
+            "bias_aligned":         confidence.bias_aligned,
+            "trap_fvg":             confidence.trap_fvg,
+            "reasons":              confidence.reasons,
+            "recommendation":       confidence.recommendation,
+        }
 
     # ── Fetch display-interval candles (strategy always uses 5m; display is separate) ──
     _disp_interval = display_interval  # e.g. "1m", "5m", "15m"
@@ -764,6 +782,7 @@ def run_backtest_day(symbol: str, target_date_str: str, account_size: float = 10
             "risk_reward": round(signal.risk_reward, 2),
             "time":        sig_time_ld,
             "time_unix":   sig_unix,
+            "confidence":  _confidence_to_dict(signal.confidence),
         },
         "outcome": {
             "result":           outcome,

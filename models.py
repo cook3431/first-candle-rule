@@ -47,6 +47,35 @@ class NoTradeReason(Enum):
     NO_LIQUIDITY_TARGET = "No obvious liquidity target for take profit"
 
 
+class DayType(Enum):
+    UNKNOWN  = "unknown"
+    TRENDING = "trending"
+    MIXUP    = "mixup"    # Both H and L broken — choppy
+    STEADY   = "steady"   # No displacement yet
+
+
+class ConfidenceGrade(Enum):
+    A_PLUS = "A+"
+    B      = "B"
+    C      = "C"
+    D      = "D"
+    TRAP   = "TRAP"
+
+
+@dataclass
+class ConfidenceScore:
+    grade:                ConfidenceGrade
+    score:                int            # 0-100 composite
+    fvg_quality:          int            # 0-90 sub-score from FVG checks
+    displacement_quality: float          # 0.0-1.0
+    bias_strength:        float          # 0.0-1.0
+    in_kill_zone:         bool
+    bias_aligned:         bool
+    trap_fvg:             bool
+    reasons:              List[str]      # Human-readable list
+    recommendation:       str            # One-line plain English summary
+
+
 @dataclass
 class Candle:
     """Represents a single price candle"""
@@ -149,6 +178,7 @@ class TradeSignal:
     no_trade_reasons: List[NoTradeReason] = field(default_factory=list)
     timestamp: Optional[datetime] = None
     notes: str = ""
+    confidence: Optional['ConfidenceScore'] = None
 
     @property
     def risk_amount(self) -> Optional[float]:

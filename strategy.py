@@ -10,7 +10,8 @@ from datetime import datetime, time, timedelta
 from typing import List, Optional, Tuple
 from models import (
     Candle, FirstCandleRange, FairValueGap, LiquidityLevel,
-    TradeSignal, SignalType, Direction, NoTradeReason, DailyStats
+    TradeSignal, SignalType, Direction, NoTradeReason, DailyStats,
+    ConfidenceScore, ConfidenceGrade, DayType,
 )
 from config import SystemConfig
 
@@ -51,6 +52,10 @@ class FirstCandleStrategy:
         # Candle buffer for FVG detection
         self._candle_buffer: List[Candle] = []
 
+        # Confidence scoring state
+        self._bias_strength: float = 0.5
+        self._displacement_quality: float = 0.5
+
     # ──────────────────────────────────────────────
     # RESET / INITIALIZATION
     # ──────────────────────────────────────────────
@@ -68,6 +73,8 @@ class FirstCandleStrategy:
         self.active_fvgs = []
         self.signal_generated = False
         self._candle_buffer = []
+        self._bias_strength = 0.5
+        self._displacement_quality = 0.5
 
     # ──────────────────────────────────────────────
     # STEP 1: BIAS DETERMINATION
@@ -76,48 +83,55 @@ class FirstCandleStrategy:
     def determine_bias(self, daily_candles: List[Candle]) -> Direction:
         """
         Determine directional bias from higher timeframe.
-
-        Rules (from Casper SMC):
-        - Look for recent displacement on Daily chart
-        - Clear bias = foundation of strategy
-        - No bias = NO TRADE
-
-        Simple implementation: Use last 3 daily candles to detect trend.
+        Also calculates and stores self._bias_strength (0.0-1.0).
         """
+        self._bias_strength = 0.5  # default moderate
+
         if len(daily_candles) < 3:
             self.bias = Direction.NONE
+            self._bias_strength = 0.0
             return self.bias
 
         recent = daily_candles[-3:]
 
-        # Check for bullish displacement (strong bullish candle)
         bullish_displacement = any(
-            c.is_bullish and c.body_size > c.total_range * 0.6
-            for c in recent
+            c.is_bullish and c.body_size > c.total_range * 0.6 for c in recent
         )
-
-        # Check for bearish displacement (strong bearish candle)
         bearish_displacement = any(
-            c.is_bearish and c.body_size > c.total_range * 0.6
-            for c in recent
+            c.is_bearish and c.body_size > c.total_range * 0.6 for c in recent
         )
 
-        # Check overall trend direction
-        closes_rising = recent[-1].close > recent[0].close
+        closes_rising  = recent[-1].close > recent[0].close
         closes_falling = recent[-1].close < recent[0].close
+        bullish_count  = sum(1 for c in recent if c.is_bullish)
+        bearish_count  = sum(1 for c in recent if c.is_bearish)
 
         if bullish_displacement and closes_rising:
             self.bias = Direction.LONG
+            self._bias_strength = 0.9 if bullish_count >= 3 else (0.75 if bullish_count >= 2 else 0.6)
         elif bearish_displacement and closes_falling:
             self.bias = Direction.SHORT
+            self._bias_strength = 0.9 if bearish_count >= 3 else (0.75 if bearish_count >= 2 else 0.6)
+        elif closes_rising:
+            self.bias = Direction.LONG
+            self._bias_strength = 0.45 if bullish_count >= 2 else 0.25
+        elif closes_falling:
+            self.bias = Direction.SHORT
+            self._bias_strength = 0.45 if bearish_count >= 2 else 0.25
         else:
-            # Fallback: use simple close comparison
-            if closes_rising:
-                self.bias = Direction.LONG
-            elif closes_falling:
-                self.bias = Direction.SHORT
+            self.bias = Direction.NONE
+            self._bias_strength = 0.0
+            return self.bias
+
+        # Session open price confirmation/contradiction
+        if self.session_open_price is not None:
+            current_price = recent[-1].close
+            if self.bias == Direction.LONG and current_price > self.session_open_price:
+                self._bias_strength = min(1.0, self._bias_strength + 0.1)
+            elif self.bias == Direction.SHORT and current_price < self.session_open_price:
+                self._bias_strength = min(1.0, self._bias_strength + 0.1)
             else:
-                self.bias = Direction.NONE
+                self._bias_strength = max(0.0, self._bias_strength - 0.1)
 
         return self.bias
 
@@ -185,36 +199,43 @@ class FirstCandleStrategy:
     def check_displacement_break(self, candle: Candle) -> Tuple[bool, Direction]:
         """
         Check if a candle has broken the first candle range with displacement.
-
-        Displacement = strong, impulsive move with body close beyond the level.
-        NOT a weak wick — needs conviction.
-
-        Returns: (is_displacement, direction)
+        Stores displacement quality (0.0-1.0) in self._displacement_quality as side effect.
+        Minimum body ratio raised to 0.5 per playbook (impulsive move requirement).
         """
         if self.first_candle is None:
             return False, Direction.NONE
 
         fc = self.first_candle
+        min_ratio = self.sc.min_displacement_body_ratio  # 0.5
 
-        # Check for break above (bullish displacement through high)
         if candle.close > fc.high:
-            # Verify it's a displacement (strong candle, not just wick)
-            body_through = candle.body_low < fc.high < candle.body_high
-            is_strong = candle.body_size > candle.total_range * 0.4
+            if candle.total_range > 0:
+                body_ratio = candle.body_size / candle.total_range
+                is_strong  = body_ratio >= min_ratio
+                quality    = min(body_ratio / 0.8, 1.0)
+            else:
+                is_strong = False
+                quality   = 0.0
 
             if is_strong:
-                self.range_broken_high = True
-                self.displacement_direction = Direction.LONG
+                self.range_broken_high        = True
+                self.displacement_direction   = Direction.LONG
+                self._displacement_quality    = quality
                 return True, Direction.LONG
 
-        # Check for break below (bearish displacement through low)
         if candle.close < fc.low:
-            body_through = candle.body_low < fc.low < candle.body_high
-            is_strong = candle.body_size > candle.total_range * 0.4
+            if candle.total_range > 0:
+                body_ratio = candle.body_size / candle.total_range
+                is_strong  = body_ratio >= min_ratio
+                quality    = min(body_ratio / 0.8, 1.0)
+            else:
+                is_strong = False
+                quality   = 0.0
 
             if is_strong:
-                self.range_broken_low = True
+                self.range_broken_low       = True
                 self.displacement_direction = Direction.SHORT
+                self._displacement_quality  = quality
                 return True, Direction.SHORT
 
         return False, Direction.NONE
@@ -282,6 +303,222 @@ class FirstCandleStrategy:
         fc = self.first_candle
         # FVG should overlap with the first candle range
         return fvg.bottom < fc.high and fvg.top > fc.low
+
+    def score_fvg_quality(self, fvg: FairValueGap) -> dict:
+        """
+        Score the quality of an FVG using 5 playbook checks.
+        Returns {'points': int, 'is_trap': bool, 'reasons': List[str]}
+
+        Maximum points: 90 (displacement candle 30 + gap size 20 + anchor 25 + c3 confirm 15)
+        Trap FVG (Consequent Encroachment) returns is_trap=True, points=0 — hard fail.
+        """
+        if self.first_candle is None:
+            return {'points': 0, 'is_trap': False, 'reasons': ['No first candle data available']}
+
+        reasons = []
+        points  = 0
+        fc      = self.first_candle
+
+        # ── Check 1: Consequent Encroachment (HARD FILTER) ────────────────────
+        if fvg.direction == Direction.LONG:
+            if fvg.candle_1.high >= fvg.candle_3.low:
+                return {
+                    'points': 0, 'is_trap': True,
+                    'reasons': ['TRAP FVG — Consequent Encroachment: c1 wick overlaps c3 wick (institutional indecision)'],
+                }
+        else:
+            if fvg.candle_1.low <= fvg.candle_3.high:
+                return {
+                    'points': 0, 'is_trap': True,
+                    'reasons': ['TRAP FVG — Consequent Encroachment: c1 wick overlaps c3 wick (institutional indecision)'],
+                }
+        reasons.append('Clean FVG — no consequent encroachment')
+
+        # ── Check 2: Displacement candle body strength (+30 max) ──────────────
+        c2 = fvg.candle_2
+        if c2.total_range > 0:
+            body_ratio = c2.body_size / c2.total_range
+            if body_ratio >= 0.70:
+                points += 30
+                reasons.append(f'Very strong displacement candle ({body_ratio*100:.0f}% body)')
+            elif body_ratio >= 0.50:
+                points += 20
+                reasons.append(f'Moderate displacement candle ({body_ratio*100:.0f}% body)')
+            elif body_ratio >= 0.35:
+                points += 10
+                reasons.append(f'Weak displacement candle ({body_ratio*100:.0f}% body) — borderline')
+            else:
+                reasons.append(f'Very weak displacement ({body_ratio*100:.0f}% body) — flag low confidence')
+        else:
+            reasons.append('Doji displacement candle — indecision')
+
+        # ── Check 3: FVG gap size relative to first candle (+20 max) ──────────
+        if fc.range_size > 0:
+            size_ratio = fvg.size / fc.range_size
+            if size_ratio >= 0.15:
+                points += 20
+                reasons.append(f'Substantial FVG ({size_ratio*100:.0f}% of first candle range)')
+            elif size_ratio >= 0.08:
+                points += 10
+                reasons.append(f'Adequate FVG ({size_ratio*100:.0f}% of first candle range)')
+            else:
+                reasons.append(f'Small FVG ({size_ratio*100:.1f}% of range) — noise risk')
+        else:
+            reasons.append('Cannot measure FVG relative size — zero range')
+
+        # ── Check 4: FVG anchored at the range break level (+25 max) ──────────
+        anchor_tol = self.market.tick_size * 3
+        if fvg.direction == Direction.LONG:
+            if abs(fvg.bottom - fc.low) <= anchor_tol:
+                points += 25
+                reasons.append('FVG anchored at first candle low — structural break confirmed')
+            else:
+                reasons.append('FVG floating above range level (not anchored) — weaker setup')
+        else:
+            if abs(fvg.top - fc.high) <= anchor_tol:
+                points += 25
+                reasons.append('FVG anchored at first candle high — structural break confirmed')
+            else:
+                reasons.append('FVG floating below range level (not anchored) — weaker setup')
+
+        # ── Check 5: Candle 3 direction confirmation (+15 max) ────────────────
+        c3 = fvg.candle_3
+        if fvg.direction == Direction.LONG and c3.is_bullish:
+            points += 15
+            reasons.append('Candle 3 bullish — confirms displacement direction')
+        elif fvg.direction == Direction.SHORT and c3.is_bearish:
+            points += 15
+            reasons.append('Candle 3 bearish — confirms displacement direction')
+        else:
+            reasons.append('Candle 3 indecision — does not confirm displacement direction')
+
+        return {'points': points, 'is_trap': False, 'reasons': reasons}
+
+    def classify_day_type(self) -> DayType:
+        """Classify today's price action based on first candle range breaks."""
+        if self.first_candle is None:
+            return DayType.UNKNOWN
+        if self.range_broken_high and self.range_broken_low:
+            return DayType.MIXUP
+        if self.range_broken_high or self.range_broken_low:
+            return DayType.TRENDING
+        return DayType.STEADY
+
+    def calculate_confidence(self, fvg: FairValueGap, current_time: datetime) -> ConfidenceScore:
+        """
+        Composite confidence score for the current trade setup.
+        Combines FVG quality, displacement strength, bias strength,
+        kill zone timing, and structural alignment.
+
+        Max possible: 100 points
+          FVG quality:         0-90
+          Displacement:        0-20
+          Bias strength:       0-15
+          Kill zone bonus:     0-10
+        """
+        reasons = []
+
+        # 1. FVG Quality sub-score
+        fvg_result = self.score_fvg_quality(fvg)
+
+        if fvg_result['is_trap']:
+            return ConfidenceScore(
+                grade=ConfidenceGrade.TRAP,
+                score=0,
+                fvg_quality=0,
+                displacement_quality=0.0,
+                bias_strength=self._bias_strength,
+                in_kill_zone=False,
+                bias_aligned=False,
+                trap_fvg=True,
+                reasons=fvg_result['reasons'],
+                recommendation='SKIP — Trap FVG detected (Consequent Encroachment)',
+            )
+
+        fvg_points = fvg_result['points']
+        reasons.extend(fvg_result['reasons'])
+
+        # 2. Displacement quality (0-20 points)
+        disp_points = int(self._displacement_quality * 20)
+        if self._displacement_quality >= 0.875:
+            reasons.append(f'Strong displacement quality ({self._displacement_quality*100:.0f}%)')
+        elif self._displacement_quality >= 0.625:
+            reasons.append(f'Moderate displacement quality ({self._displacement_quality*100:.0f}%)')
+        else:
+            reasons.append(f'Weak displacement ({self._displacement_quality*100:.0f}%) — reduces confidence')
+
+        # 3. Bias strength (0-15 points)
+        bias_points = int(self._bias_strength * 15)
+        if self._bias_strength >= 0.8:
+            reasons.append('Strong HTF bias — high conviction directional move')
+        elif self._bias_strength >= 0.5:
+            reasons.append('Moderate HTF bias')
+        else:
+            reasons.append('Weak HTF bias — limited conviction')
+
+        # 4. Kill zone timing bonus (+10)
+        current_t = current_time.time()
+        in_kill_zone = (
+            (self.session.ny_am_kill_zone_start <= current_t <= self.session.ny_am_kill_zone_end)
+            or (self.session.ny_pm_kill_zone_start <= current_t <= self.session.ny_pm_kill_zone_end)
+            or (self.session.london_kill_zone_start <= current_t <= self.session.london_kill_zone_end)
+        )
+        kill_points = 10 if in_kill_zone else 0
+        reasons.append('Inside kill zone — optimal institutional timing' if in_kill_zone
+                       else 'Outside peak kill zone hours')
+
+        # 5. Bias alignment (sweep direction vs HTF bias)
+        # Break HIGH + SHORT FVG = swept buy-side, distributing lower (matches bearish bias)
+        # Break LOW + LONG FVG = swept sell-side, accumulating higher (matches bullish bias)
+        bias_aligned = (
+            (self.range_broken_high and self.bias == Direction.SHORT) or
+            (self.range_broken_low  and self.bias == Direction.LONG)
+        )
+        reasons.append('HTF bias aligned with sweep direction' if bias_aligned
+                       else 'HTF bias vs sweep direction mismatch — weaker probability')
+
+        # 6. Mixup day cap
+        day_type = self.classify_day_type()
+        if day_type == DayType.MIXUP:
+            reasons.append('Mixup day — both H and L broken, choppy conditions detected')
+
+        # Composite score
+        total = min(100, fvg_points + disp_points + bias_points + kill_points)
+
+        # Apply caps for adverse conditions
+        if not bias_aligned:
+            total = min(total, 74)
+        if day_type == DayType.MIXUP:
+            total = min(total, 59)
+        if self._bias_strength < 0.5:
+            total = min(total, 59)
+
+        # Grade
+        if total >= 80:
+            grade = ConfidenceGrade.A_PLUS
+            recommendation = 'HIGH CONFIDENCE — A+ setup, all key filters passed'
+        elif total >= 60:
+            grade = ConfidenceGrade.B
+            recommendation = 'GOOD SETUP — B grade, minor weaknesses present'
+        elif total >= 40:
+            grade = ConfidenceGrade.C
+            recommendation = 'MARGINAL SETUP — C grade, proceed with caution'
+        else:
+            grade = ConfidenceGrade.D
+            recommendation = 'WEAK SETUP — D grade, skip recommended'
+
+        return ConfidenceScore(
+            grade=grade,
+            score=total,
+            fvg_quality=fvg_points,
+            displacement_quality=self._displacement_quality,
+            bias_strength=self._bias_strength,
+            in_kill_zone=in_kill_zone,
+            bias_aligned=bias_aligned,
+            trap_fvg=False,
+            reasons=reasons,
+            recommendation=recommendation,
+        )
 
     # ──────────────────────────────────────────────
     # STEP 6: SIGNAL GENERATION
@@ -435,6 +672,18 @@ class FirstCandleStrategy:
                 else SignalType.ENTER_SHORT
             )
 
+            # Calculate confidence score
+            confidence = self.calculate_confidence(fvg, current_time)
+
+            # Suppress TRAP FVGs entirely
+            if confidence.trap_fvg:
+                return TradeSignal(
+                    signal_type=SignalType.NO_SIGNAL,
+                    no_trade_reasons=[NoTradeReason.NO_FVG],
+                    timestamp=current_time,
+                    notes='Trap FVG suppressed — Consequent Encroachment detected',
+                )
+
             self.signal_generated = True
 
             return TradeSignal(
@@ -448,6 +697,7 @@ class FirstCandleStrategy:
                 first_candle=self.first_candle,
                 timestamp=current_time,
                 notes=f"First Candle Rule — {'Long' if trade_direction == Direction.LONG else 'Short'} via FVG",
+                confidence=confidence,
             )
 
         return TradeSignal(

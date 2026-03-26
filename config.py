@@ -107,6 +107,16 @@ class FirstCandleConfig:
     # Close all trades by this time EST
     close_all_time: time = time(15, 55)
 
+    # --- Confidence Scoring ---
+    # Minimum displacement candle body ratio (raised from 0.4 — playbook says impulsive)
+    min_displacement_body_ratio: float = 0.5
+
+    # Minimum confidence score to fire a signal (D-grade < 40 suppressed)
+    min_confidence_to_signal: int = 40
+
+    # Show D-grade signals in UI (marked skip) vs suppress entirely
+    show_d_grade_signals: bool = True
+
 
 @dataclass
 class MarketConfig:

@@ -188,6 +188,14 @@
   .port-col-total td { background:var(--bg); font-weight:700; font-size:11px; }
   .port-grand { background:var(--surface)!important; font-size:13px!important; border-left:2px solid var(--border)!important; }
 
+  /* ── Confidence grade badges ──────────────────────────────────────────── */
+  .conf-pill { display:inline-flex;align-items:center;gap:5px;padding:3px 10px;border-radius:12px;font-size:11px;font-weight:800;letter-spacing:.05em;flex-shrink:0; }
+  .grade-aplus { background:#003d20;color:#00e09a;border:1px solid #00734e; }
+  .grade-b     { background:#001a3d;color:#4d9fff;border:1px solid #1a3d6e; }
+  .grade-c     { background:#3d2500;color:#ffc12b;border:1px solid #6b4f00; }
+  .grade-d     { background:#3d0010;color:#ff4060;border:1px solid #7a1f30; }
+  .grade-trap  { background:#1a0008;color:#ff6080;border:1px solid #4a0018; }
+
   /* ── Broker / auto-execute ────────────────────────────────────────────── */
   @keyframes fadeInUp { from{opacity:0;transform:translateY(10px)} to{opacity:1;transform:translateY(0)} }
 
@@ -279,6 +287,16 @@
         <div class="lbox"><div class="lbl">Take Profit</div><div class="val g" id="lTP">–</div><div class="sub" id="lTPSub">Target</div></div>
         <div class="lbox"><div class="lbl">R:R Ratio</div><div class="val y" id="lRR">–</div><div class="sub">Risk/reward</div></div>
       </div>
+      <!-- Confidence badge — populated from API confidence data -->
+      <div id="confSec" style="display:none;padding:10px 12px;margin-bottom:10px;background:var(--bg);border:1px solid var(--border);border-radius:8px">
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+          <span id="confGradePill" class="conf-pill">–</span>
+          <span id="confScore" style="font-size:12px;color:var(--text-dim)"></span>
+          <span id="confRec" style="font-size:11px;color:var(--text-dim);margin-left:auto;text-align:right"></span>
+        </div>
+        <ul id="confReasons" style="list-style:none;padding:0;margin-top:6px;display:flex;flex-direction:column;gap:3px"></ul>
+      </div>
+
       <div class="size-box"><div class="lbl">Position Size (1% risk)</div><div class="val" id="lSize" style="font-size:15px">–</div></div>
 
       <!-- Price bar -->
@@ -797,6 +815,28 @@ function render(data) {
     document.getElementById('lRR').textContent=(sig.risk_reward||0).toFixed(1)+':1';
     document.getElementById('lSLSub').textContent=isLong?'Below first candle low':'Above first candle high';
     document.getElementById('lTPSub').textContent=`+${Math.abs((sig.take_profit||0)-(sig.entry||0)).toFixed(2)} pts`;
+
+    // Confidence
+    const conf = sig.confidence;
+    const confSec = document.getElementById('confSec');
+    if (conf && conf.grade) {
+      confSec.style.display = '';
+      const _gradeMap = { A_PLUS:{cls:'grade-aplus',label:'A+ Signal'}, B:{cls:'grade-b',label:'B Signal'},
+                          C:{cls:'grade-c',label:'C Signal'}, D:{cls:'grade-d',label:'D Signal'},
+                          TRAP:{cls:'grade-trap',label:'TRAP — No Trade'} };
+      const gm = _gradeMap[conf.grade] || {cls:'grade-d', label:conf.grade};
+      const pill = document.getElementById('confGradePill');
+      pill.className   = `conf-pill ${gm.cls}`;
+      pill.textContent = gm.label;
+      document.getElementById('confScore').textContent = `Score: ${conf.score}/100`;
+      document.getElementById('confRec').textContent   = conf.recommendation || '';
+      document.getElementById('confReasons').innerHTML = (conf.reasons||[]).map(r =>
+        `<li style="display:flex;gap:6px;align-items:flex-start;font-size:11px;color:var(--text-dim)">
+           <span style="flex-shrink:0;color:var(--border)">•</span><span>${r}</span></li>`).join('');
+    } else {
+      confSec.style.display = 'none';
+    }
+
     // Size
     const rp=Math.abs((sig.entry||0)-(sig.stop_loss||0));
     const isFut=LS.sym.endsWith('=F');
@@ -1390,6 +1430,17 @@ function renderBacktest(d) {
   const levEl = document.getElementById('btLevels');
   if (hasSignal) {
     levEl.style.display = '';
+    // Build confidence snippet for the levels grid
+    const _btGradeMap = { A_PLUS:{cls:'grade-aplus',label:'A+'}, B:{cls:'grade-b',label:'B'},
+                          C:{cls:'grade-c',label:'C'}, D:{cls:'grade-d',label:'D'}, TRAP:{cls:'grade-trap',label:'TRAP'} };
+    const btConf = sig.confidence;
+    const btGm   = btConf ? (_btGradeMap[btConf.grade] || {cls:'grade-d', label:btConf.grade}) : null;
+    const btConfHtml = btConf ? `
+      <div class="lbox" style="grid-column:1/-1;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <span class="conf-pill ${btGm.cls}">${btGm.label}</span>
+        <span style="font-size:11px;color:var(--text-dim)">Score: ${btConf.score}/100</span>
+        <span style="font-size:11px;color:var(--text-dim)">${(btConf.reasons||[]).slice(0,3).join(' · ')}</span>
+      </div>` : '';
     levEl.innerHTML = `
       <div class="lbox"><div class="lbl">Entry</div><div class="val">${sig.entry||'–'}</div><div class="sub">${sig.time||'–'}</div></div>
       <div class="lbox"><div class="lbl">Stop Loss</div><div class="val r">${sig.stop_loss||'–'}</div><div class="sub">${sig.direction==='LONG'?'Below FC low':'Above FC high'}</div></div>
@@ -1397,7 +1448,7 @@ function renderBacktest(d) {
       <div class="lbox"><div class="lbl">Result</div>
         <div class="val ${status==='WIN'?'g':'r'}" style="${status!=='WIN'&&status!=='LOSS'?'color:var(--text-dim)':''}">${out.exit_price||'–'}</div>
         <div class="sub">${out.exit_time||'–'}</div>
-      </div>`;
+      </div>${btConfHtml}`;
   } else {
     levEl.style.display = 'none';
   }
@@ -1802,11 +1853,17 @@ function monRenderGrid() {
       const d = _monData[sym];
       const isL = d.direction === 'LONG';
       const col = isL ? 'var(--green)' : 'var(--red)';
+      const _alertGradeMap = {A_PLUS:{cls:'grade-aplus',label:'A+'},B:{cls:'grade-b',label:'B'},
+                               C:{cls:'grade-c',label:'C'},D:{cls:'grade-d',label:'D'},TRAP:{cls:'grade-trap',label:'TRAP'}};
+      const ac = d.confidence;
+      const agm = ac ? (_alertGradeMap[ac.grade]||{cls:'grade-d',label:ac.grade}) : null;
+      const confChip = ac ? `<span class="conf-pill ${agm.cls}" style="font-size:11px">${agm.label} · ${ac.score}/100</span>` : '';
       return `
         <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
           <span class="badge ${isL?'b-long pulse':'b-short pulse'}" style="font-size:12px">
             ${isL?'▲ BUY':'▼ SELL'} ${sym}
           </span>
+          ${confChip}
           <span style="color:var(--bright);font-size:13px">Entry <strong>${(d.entry||0).toFixed(2)}</strong></span>
           <span style="color:var(--red);font-size:12px">SL ${(d.stop_loss||0).toFixed(2)}</span>
           <span style="color:var(--green);font-size:12px">TP ${(d.take_profit||0).toFixed(2)}</span>
@@ -1844,10 +1901,16 @@ function monRenderCard(sym, d) {
   } else if (isSig) {
     cardCls += isLong ? ' sc-long' : ' sc-short';
     const col = isLong ? 'var(--green)' : 'var(--red)';
+    const _monGradeMap = {A_PLUS:{cls:'grade-aplus',label:'A+'},B:{cls:'grade-b',label:'B'},
+                          C:{cls:'grade-c',label:'C'},D:{cls:'grade-d',label:'D'},TRAP:{cls:'grade-trap',label:'TRAP'}};
+    const monConf = d.confidence;
+    const monGm   = monConf ? (_monGradeMap[monConf.grade]||{cls:'grade-d',label:monConf.grade}) : null;
+    const confChip = monConf ? `<span class="conf-pill ${monGm.cls}" style="font-size:10px;margin-bottom:6px">${monGm.label} · ${monConf.score}/100</span>` : '';
     body = `
-      <div class="badge ${isLong?'b-long pulse':'b-short pulse'}" style="margin:6px 0 10px">
+      <div class="badge ${isLong?'b-long pulse':'b-short pulse'}" style="margin:6px 0 8px">
         ${isLong?'▲ BUY SIGNAL':'▼ SELL SIGNAL'}
       </div>
+      ${confChip}
       <div style="display:grid;grid-template-columns:auto 1fr;gap:3px 10px;font-size:12px;margin-bottom:10px">
         <span style="color:var(--text-dim)">Entry</span>
         <span style="color:var(--bright);font-weight:700">${(d.entry||0).toFixed(2)}</span>
