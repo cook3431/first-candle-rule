@@ -222,6 +222,8 @@ def backtest_stock_day(symbol: str, trade_date: date) -> Optional[DayResult]:
     market_cfg = get_market_config(symbol)
     config     = SystemConfig()
     config.market = market_cfg
+    config.strategy.kill_zone_only = False   # enforce via timing, not hard-block
+    config.strategy.skip_mondays   = True
 
     strategy = FirstCandleStrategy(config)
     strategy.reset_daily_state(datetime.combine(trade_date, time(9, 30)))
@@ -233,14 +235,14 @@ def backtest_stock_day(symbol: str, trade_date: date) -> Optional[DayResult]:
     if not daily_candles or not intraday_30min or not intraday_5min:
         return None
 
-    strategy.determine_bias(daily_candles)
+    confirmed_daily = daily_candles[-5:]
+    strategy.determine_bias(confirmed_daily)
     if strategy.bias == Direction.NONE:
         return None
 
-    if len(daily_candles) >= 2:
-        pdh = max(c.high for c in daily_candles[-2:-1])
-        pdl = min(c.low  for c in daily_candles[-2:-1])
-        strategy.mark_liquidity_levels(pdh, pdl)
+    prev_day = confirmed_daily[-1]
+    strategy.mark_liquidity_levels(prev_day_high=prev_day.high, prev_day_low=prev_day.low)
+    strategy.set_session_open_price(prev_day.close)
 
     fc_candle = get_first_candle_30min(intraday_30min)
     if fc_candle is None:
@@ -256,7 +258,7 @@ def backtest_stock_day(symbol: str, trade_date: date) -> Optional[DayResult]:
     for i in range(3, len(post_range) + 1):
         window       = post_range[:i]
         current_time = datetime.combine(trade_date, window[-1].timestamp.time())
-        if current_time.time() >= time(12, 0):
+        if current_time.time() >= time(15, 0):
             break
         sig = strategy.generate_signal(current_time, window)
         if sig.signal_type in (SignalType.ENTER_LONG, SignalType.ENTER_SHORT):
