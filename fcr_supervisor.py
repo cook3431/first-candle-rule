@@ -27,8 +27,10 @@ STATE_DIR = ROOT / "state"
 LOGS_DIR  = ROOT / "logs"
 ET        = pytz.timezone("America/New_York")
 
-DONE_TIME     = dtime(15, 0)    # No new entries after this
-EOD_CLOSE_TIME= dtime(15, 55)   # Force EOD close after this
+DONE_TIME      = dtime(15, 0)    # No new entries after this
+EOD_CLOSE_TIME = dtime(15, 55)   # Force EOD close after this
+STREAM_START   = dtime(9, 25)    # Start stream before first candle
+STREAM_STOP    = dtime(16, 5)    # Stream exits itself after this
 
 logging.basicConfig(
     level=logging.INFO,
@@ -111,6 +113,14 @@ def check_system():
 
     _write_heartbeat(now_et)
     log.debug(f"Phase={phase}  time={now_et.strftime('%H:%M')}")
+
+    # ── Stream process: ensure it's running during market hours ──────────────
+    t = now_et.time()
+    if STREAM_START <= t < STREAM_STOP:
+        stream_pid = STATE_DIR / "stream.pid"
+        if not _is_running(stream_pid):
+            log.info("Stream not running during market hours — starting fcr_stream.py")
+            _launch("fcr_stream.py", "stream.log")
 
     # ── EOD safety net: force close if in trade past 15:55 ────────────────────
     if phase == "IN_TRADE" and now_et.time() >= EOD_CLOSE_TIME:
