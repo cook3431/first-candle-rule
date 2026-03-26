@@ -125,22 +125,24 @@ def api_broker_status():
 def api_broker_execute():
     """
     Place a bracket order on Alpaca.
-    Body JSON: { symbol, direction, entry, stop_loss, take_profit }
-    Risk is fixed at $100 per trade (qty calculated server-side).
+    Body JSON: { symbol, direction, entry, stop_loss, take_profit, risk_dollars }
+    risk_dollars: dollars to risk per trade (default 1000, clamped 10–50000).
     """
     from broker import execute_bracket_order
     data = request.get_json(silent=True) or {}
 
-    symbol      = str(data.get("symbol",      "")).upper().strip()
-    direction   = str(data.get("direction",   "")).upper().strip()
-    entry       = float(data.get("entry",       0) or 0)
-    stop_loss   = float(data.get("stop_loss",   0) or 0)
-    take_profit = float(data.get("take_profit", 0) or 0)
+    symbol       = str(data.get("symbol",      "")).upper().strip()
+    direction    = str(data.get("direction",   "")).upper().strip()
+    entry        = float(data.get("entry",       0) or 0)
+    stop_loss    = float(data.get("stop_loss",   0) or 0)
+    take_profit  = float(data.get("take_profit", 0) or 0)
+    risk_dollars = float(data.get("risk_dollars", 1000) or 1000)
+    risk_dollars = max(10.0, min(50000.0, risk_dollars))   # server-side clamp
 
     if not symbol or direction not in ("LONG", "SHORT") or not entry or not stop_loss or not take_profit:
         return jsonify({"success": False, "error": "Missing or invalid parameters."}), 400
 
-    result = execute_bracket_order(symbol, direction, entry, stop_loss, take_profit, risk_dollars=100.0)
+    result = execute_bracket_order(symbol, direction, entry, stop_loss, take_profit, risk_dollars=risk_dollars)
     return jsonify(result), (200 if result["success"] else 422)
 
 

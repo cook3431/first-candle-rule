@@ -202,6 +202,11 @@
   .ae-wrap.on .ae-thumb { transform:translateX(16px); }
   .ae-lbl   { font-size:11px; font-weight:700; color:var(--text-dim); white-space:nowrap; }
   .ae-wrap.on .ae-lbl { color:var(--green); }
+  /* Risk-per-trade input */
+  .risk-wrap { display:flex; align-items:center; gap:5px; padding:4px 10px; background:var(--surface2); border:1px solid var(--border); border-radius:6px; font-size:11px; font-weight:700; color:var(--text-dim); white-space:nowrap; }
+  .risk-wrap span { color:var(--bright); }
+  .risk-input { width:64px; background:var(--bg); border:1px solid var(--border); border-radius:4px; color:var(--bright); font-size:12px; font-weight:700; padding:2px 5px; text-align:right; outline:none; }
+  .risk-input:focus { border-color:var(--blue); }
 </style>
 </head>
 <body>
@@ -229,6 +234,11 @@
     <button class="mode-btn"        id="modeMonitor"  onclick="setMonMode('monitor')">📡 Live Monitor</button>
   </div>
   <div class="spacer"></div>
+  <!-- Risk per trade (configurable) -->
+  <div class="risk-wrap" title="Maximum dollars risked per trade (used for position sizing)">
+    Risk/trade: $<input class="risk-input" id="riskInput" type="number" min="10" max="50000" step="100" value="1000"
+      onchange="setRiskPerTrade(this.value)" onblur="setRiskPerTrade(this.value)">
+  </div>
   <!-- Alpaca auto-execute toggle -->
   <div class="ae-wrap" id="aeWrap" onclick="toggleAutoExecute()" title="Auto-execute trades via Alpaca when a signal fires">
     <div class="ae-track">
@@ -297,7 +307,7 @@
         <div id="brokerStatusLine" style="display:none;font-size:11px;color:var(--green);padding:7px 12px;
           background:#001a10;border-radius:6px;border:1px solid var(--green-d);font-weight:600">
           <span class="live-dot" style="background:var(--green);margin-right:5px"></span>
-          Auto-Execute ON — order will be placed via Alpaca automatically
+          Auto-Execute ON — Alpaca will risk <span id="bslRisk">$1,000</span> per trade
         </div>
       </div>
     </div>
@@ -516,6 +526,8 @@ const LS = {
   set signal(v) { localStorage.setItem('signal', JSON.stringify(v)); },
 
   // ── Broker / auto-execute ──
+  get riskPerTrade()  { return parseInt(localStorage.getItem('riskPerTrade') || '1000'); },
+  set riskPerTrade(v) { localStorage.setItem('riskPerTrade', String(Math.max(10, Math.min(50000, parseInt(v)||1000)))); },
   get autoExecute()   { return localStorage.getItem('autoExecute') === 'true'; },
   set autoExecute(v)  { localStorage.setItem('autoExecute', String(v)); },
   // executedToday: { "QQQ": "2026-03-25" } — prevents duplicate orders same day
@@ -895,9 +907,26 @@ function updateAutoExecuteUI() {
   const wrap = document.getElementById('aeWrap');
   const lbl  = document.getElementById('aeLbl');
   if (!wrap) return;
-  const on = LS.autoExecute;
+  const on   = LS.autoExecute;
+  const risk = LS.riskPerTrade;
   wrap.classList.toggle('on', on);
   lbl.textContent = on ? 'Auto-Execute: ON' : 'Auto-Execute: OFF';
+  // Keep risk input and status line in sync
+  const inp = document.getElementById('riskInput');
+  if (inp && document.activeElement !== inp) inp.value = risk;
+  const bsl = document.getElementById('bslRisk');
+  if (bsl) bsl.textContent = '$' + risk.toLocaleString();
+}
+
+function setRiskPerTrade(val) {
+  const parsed = parseInt(val) || 1000;
+  LS.riskPerTrade = parsed;                       // LS setter clamps to 10–50000
+  const clamped = LS.riskPerTrade;
+  const inp = document.getElementById('riskInput');
+  if (inp) inp.value = clamped;
+  const bsl = document.getElementById('bslRisk');
+  if (bsl) bsl.textContent = '$' + clamped.toLocaleString();
+  pushAlert(`Risk per trade set to $${clamped.toLocaleString()}`, 'info');
 }
 
 function toggleAutoExecute() {
@@ -929,19 +958,21 @@ async function autoExecuteTrade(sig) {
     pushAlert(`Not in kill zone (${sig.phase}) — auto-execute skipped`, 'warning'); return;
   }
 
-  showToast(`⚡ Executing ${sig.direction} ${sym}…`, 'info');
-  pushAlert(`Auto-executing: ${sig.direction} ${sym} @ ${(sig.entry||0).toFixed(2)} | SL ${(sig.stop_loss||0).toFixed(2)} | TP ${(sig.take_profit||0).toFixed(2)}`, 'info');
+  const risk = LS.riskPerTrade;
+  showToast(`⚡ Executing ${sig.direction} ${sym} — risking $${risk.toLocaleString()}…`, 'info');
+  pushAlert(`Auto-executing: ${sig.direction} ${sym} @ ${(sig.entry||0).toFixed(2)} | SL ${(sig.stop_loss||0).toFixed(2)} | TP ${(sig.take_profit||0).toFixed(2)} | Risk $${risk.toLocaleString()}`, 'info');
 
   try {
     const r = await fetch('/api/broker/execute', {
       method:  'POST',
       headers: {'Content-Type': 'application/json'},
       body:    JSON.stringify({
-        symbol:      sym,
-        direction:   sig.direction,
-        entry:       sig.entry,
-        stop_loss:   sig.stop_loss,
-        take_profit: sig.take_profit,
+        symbol:       sym,
+        direction:    sig.direction,
+        entry:        sig.entry,
+        stop_loss:    sig.stop_loss,
+        take_profit:  sig.take_profit,
+        risk_dollars: risk,
       }),
     });
     const d = await r.json();
@@ -951,9 +982,9 @@ async function autoExecuteTrade(sig) {
       LS.inTrade = true;
       LS.signal  = sig;
       const mode = d.paper ? '[PAPER]' : '[LIVE]';
-      showToast(`✅ ${mode} Order placed! ${d.qty} × ${sym}`, 'success');
+      showToast(`✅ ${mode} Order placed! ${d.qty} × ${sym} (risk $${risk.toLocaleString()})`, 'success');
       pushAlert(
-        `${mode} BRACKET ORDER PLACED: ${d.side} ${d.qty} × ${d.symbol} | Entry $${d.entry} | SL $${d.stop_loss} | TP $${d.take_profit} | ID: ${(d.order_id||'').slice(0,8)}…`,
+        `${mode} BRACKET ORDER: ${d.side} ${d.qty} × ${d.symbol} | Entry $${d.entry} | SL $${d.stop_loss} | TP $${d.take_profit} | Risk $${risk.toLocaleString()} | ID: ${(d.order_id||'').slice(0,8)}…`,
         'success'
       );
       setTimeout(refreshPositions, 1500);   // brief delay so Alpaca reflects the order
@@ -2017,6 +2048,9 @@ function renderPortfolioTable() {
 }
 
 // ─── Boot ────────────────────────────────────────────────────────────────────
+
+// Seed risk input from localStorage (persists across page reloads)
+(function(){ const inp = document.getElementById('riskInput'); if(inp) inp.value = LS.riskPerTrade; })();
 
 // Check broker status — enables auto-execute toggle if Alpaca keys are configured
 checkBrokerStatus();
