@@ -302,17 +302,43 @@ def activate_native_trail(
     trail_amount:          float,
     current_stop_order_id: str,
 ) -> dict:
-    """Swap hard stop for Alpaca native trailing stop at 1R activation."""
+    """
+    Swap hard stop for Alpaca native trailing stop at 1R activation.
+
+    With OTO orders the child stop is created by Alpaca after parent fill and
+    has a different ID.  We cancel ALL open stop/stop_limit orders for this
+    symbol on the correct side, then place the native trailing stop.
+    """
     client = _get_client()
     if not client:
         return {"success": False, "error": "Could not create Alpaca client."}
     try:
-        client.cancel_order_by_id(current_stop_order_id)
-        from alpaca.trading.requests import TrailingStopOrderRequest
+        from alpaca.trading.requests import TrailingStopOrderRequest, GetOrdersRequest
+        from alpaca.trading.enums import OrderStatus, OrderType
+
+        # Cancel every open stop order for this symbol/side (handles OTO child IDs)
+        close_side = OrderSide.SELL if direction == "LONG" else OrderSide.BUY
+        try:
+            open_orders = client.get_orders(
+                GetOrdersRequest(status=OrderStatus.OPEN, symbols=[symbol])
+            )
+            for o in open_orders:
+                o_side = o.side if isinstance(o.side, str) else o.side.value
+                o_type = str(o.type.value if hasattr(o.type, "value") else o.type)
+                o_side_v = o_side if isinstance(o_side, str) else o_side.value
+                cs_v = close_side.value if hasattr(close_side, "value") else close_side
+                if o_type in ("stop", "stop_limit") and o_side_v == cs_v:
+                    try:
+                        client.cancel_order_by_id(str(o.id))
+                    except Exception:
+                        pass
+        except Exception:
+            pass  # If we can't list/cancel, still attempt the trail order
+
         trail_order = TrailingStopOrderRequest(
             symbol        = symbol,
             qty           = qty,
-            side          = OrderSide.SELL if direction == "LONG" else OrderSide.BUY,
+            side          = close_side,
             time_in_force = TimeInForce.DAY,
             trail_price   = round(trail_amount, 2),
         )

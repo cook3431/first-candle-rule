@@ -274,6 +274,27 @@
     <div class="phase" id="ph5">Done</div>
   </div>
 
+  <!-- ── Execution mode banner — shown when auto-execute is armed ──────────── -->
+  <div id="execModeBanner" style="display:none;margin-bottom:10px;padding:10px 14px;
+       border:1px solid var(--yellow);border-radius:8px;background:rgba(255,180,0,0.05)">
+    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:5px">
+      <span style="font-size:13px;font-weight:800;color:var(--yellow)">⚡ MODE B — TRAILING STOP</span>
+      <span id="execModePaperTag" style="font-size:9px;padding:2px 6px;border-radius:3px;
+            background:var(--yellow);color:#000;font-weight:800;letter-spacing:.04em">PAPER</span>
+      <span style="font-size:10px;color:var(--text-dim);margin-left:auto">
+        Risk/trade: <span id="execModeRisk" style="color:var(--bright);font-weight:700">$1,000</span>
+      </span>
+    </div>
+    <div style="font-size:11px;color:var(--text-dim);line-height:1.7">
+      <span style="color:var(--yellow);font-weight:700">⚠ Deviates from standard daily rules.</span>
+      No fixed take-profit. Trail = initial risk / share. Activates at 1R profit.<br>
+      <span style="color:var(--text-dim);font-size:10px">
+        Mode A (standard rules): fixed 3R TP + hard SL &nbsp;·&nbsp;
+        Mode B (this session): trail rides winners, no cap on upside
+      </span>
+    </div>
+  </div>
+
   <!-- Signal card -->
   <div class="sig-card" id="sigCard">
     <div class="badge b-wait" id="badge">⏳ Connecting…</div>
@@ -326,7 +347,7 @@
         <div id="brokerStatusLine" style="display:none;font-size:11px;color:var(--green);padding:7px 12px;
           background:#001a10;border-radius:6px;border:1px solid var(--green-d);font-weight:600">
           <span class="live-dot" style="background:var(--green);margin-right:5px"></span>
-          Auto-Execute ON — Alpaca will risk <span id="bslRisk">$1,000</span> per trade
+          ⚡ MODE B AUTO-EXECUTE — <span id="bslRisk">$1,000</span> risk · trail stop · no fixed TP
         </div>
       </div>
     </div>
@@ -715,18 +736,22 @@ function _portCacheFlush(store) {
 }
 
 // ─── Adaptive scan scheduling ─────────────────────────────────────────────────
-// During kill zone (15:00–16:00 BST): scan every 60 s — signals can fire any moment
-// First candle forming (14:30–15:00 BST): every 2 min — watching but no entries yet
+// Kill zones (NY 10:00–11:00 AM, 14:00–15:00 PM): scan every 60 s — signals can fire any moment
+// First candle forming (NY 09:30–10:00): every 2 min — watching but no entries yet
 // Pre-market / post-close: every 5 min — nothing happening, save API calls
 // In trade: every 30 s — price tracking matters
+// Uses NY time directly so it is correct in both GMT and BST seasons.
 function _nextScanDelay() {
   if (LS.inTrade) return 30_000;
   const now   = new Date();
-  const loStr = now.toLocaleString('en-GB', {timeZone:'Europe/London', hour:'2-digit', minute:'2-digit', hour12:false});
-  const [lh, lm] = loStr.split(':').map(Number);
-  const lMins = lh * 60 + lm;
-  if (lMins >= 15 * 60 && lMins < 16 * 60) return 60_000;    // kill zone
-  if (lMins >= 14 * 60 && lMins < 15 * 60) return 120_000;   // first candle
+  const nyStr = now.toLocaleString('en-US', {timeZone:'America/New_York', hour:'2-digit', minute:'2-digit', hour12:false});
+  // en-US 24h output is "HH:MM" but may include a leading space — strip non-digit prefix
+  const parts = nyStr.replace(/[^\d:]/g,'').split(':').map(Number);
+  const nyMins = parts[0] * 60 + (parts[1] || 0);
+  // Kill zones: AM 10:00–11:00 and PM 14:00–15:00 NY
+  if ((nyMins >= 10*60 && nyMins < 11*60) || (nyMins >= 14*60 && nyMins < 15*60)) return 60_000;
+  // First candle forming 09:30–10:00 NY
+  if (nyMins >= 9*60+30 && nyMins < 10*60) return 120_000;
   return 300_000;                                              // pre/post market
 }
 
@@ -1093,7 +1118,7 @@ function enterTrade() {
 function exitTrade() {
   if(!confirm('Mark this trade as closed and reset the scanner?')) return;
   LS.inTrade=false; LS.signal=null;
-  _trailTradeId=null; _trailQty=0;   // clear Mode B trail state
+  _trailStateClear();   // clear Mode B trail state (memory + localStorage)
   pushAlert('Trade closed — scanner reset','info');
   if (_brokerEnabled) refreshPositions();
   doScan(true);
@@ -1102,14 +1127,17 @@ function exitTrade() {
 // ─── Broker / Auto-Execute ───────────────────────────────────────────────────
 
 let _brokerEnabled = false;   // set by checkBrokerStatus() on page load
+let _brokerPaper   = true;    // true = paper account, false = live
 
 async function checkBrokerStatus() {
   try {
     const r = await fetch('/api/broker/status');
     const d = await r.json();
     _brokerEnabled = d.configured === true;
+    _brokerPaper   = d.paper !== false;   // default true if not specified
   } catch(e) {
     _brokerEnabled = false;
+    _brokerPaper   = true;
   }
   updateAutoExecuteUI();   // sync toggle visual to current LS.autoExecute
   if (_brokerEnabled) {
@@ -1132,6 +1160,31 @@ function updateAutoExecuteUI() {
   if (inp && document.activeElement !== inp) inp.value = risk;
   const bsl = document.getElementById('bslRisk');
   if (bsl) bsl.textContent = '$' + risk.toLocaleString();
+
+  // ── Execution mode banner ──────────────────────────────────────────────────
+  const banner = document.getElementById('execModeBanner');
+  if (banner) {
+    const armed = on && _brokerEnabled;
+    banner.style.display = armed ? '' : 'none';
+    if (armed) {
+      // Risk amount
+      const riskEl = document.getElementById('execModeRisk');
+      if (riskEl) riskEl.textContent = '$' + risk.toLocaleString();
+      // Paper / live tag
+      const tag = document.getElementById('execModePaperTag');
+      if (tag) {
+        if (_brokerPaper) {
+          tag.textContent = 'PAPER';
+          tag.style.background = 'var(--yellow)';
+          tag.style.color = '#000';
+        } else {
+          tag.textContent = 'LIVE';
+          tag.style.background = 'var(--red)';
+          tag.style.color = '#fff';
+        }
+      }
+    }
+  }
 }
 
 function setRiskPerTrade(val) {
@@ -1142,6 +1195,8 @@ function setRiskPerTrade(val) {
   if (inp) inp.value = clamped;
   const bsl = document.getElementById('bslRisk');
   if (bsl) bsl.textContent = '$' + clamped.toLocaleString();
+  const riskEl = document.getElementById('execModeRisk');
+  if (riskEl) riskEl.textContent = '$' + clamped.toLocaleString();
   pushAlert(`Risk per trade set to $${clamped.toLocaleString()}`, 'info');
 }
 
@@ -1160,8 +1215,26 @@ function toggleAutoExecute() {
 }
 
 // ── Mode B trail state ────────────────────────────────────────────────────────
-let _trailTradeId = null;   // Alpaca order ID of the active OTO entry order
-let _trailQty     = 0;      // shares/contracts in active trail trade
+// Persisted to localStorage so page refresh doesn't lose trail state.
+// Shape: { trade_id, sym, dir, entry, stop, risk, trail, qty, act, hwm, stop_oid }
+let _trailState = null;
+
+function _trailStateSave() {
+  try { localStorage.setItem('trailState', JSON.stringify(_trailState)); } catch {}
+}
+function _trailStateLoad() {
+  try {
+    const raw = localStorage.getItem('trailState');
+    if (raw) _trailState = JSON.parse(raw);
+  } catch {}
+}
+function _trailStateClear() {
+  _trailState = null;
+  try { localStorage.removeItem('trailState'); } catch {}
+}
+
+// Restore on page load if a trade is already active
+if (LS.inTrade) _trailStateLoad();
 
 async function autoExecuteTrade(sig) {
   const sym = sig.symbol || LS.sym;
@@ -1199,10 +1272,23 @@ async function autoExecuteTrade(sig) {
 
     if (d.success) {
       LS.markExecutedToday(sym);
-      LS.inTrade   = true;
-      LS.signal    = sig;
-      _trailTradeId = d.order_id;
-      _trailQty     = d.qty;
+      LS.inTrade = true;
+      LS.signal  = sig;
+      // Build persistent trail state — survives page refresh
+      _trailState = {
+        trade_id: d.order_id,
+        sym:      sym,
+        dir:      sig.direction,
+        entry:    d.entry,
+        stop:     d.initial_stop,
+        risk:     d.trail_amount,   // risk/share = initial trail
+        trail:    d.trail_amount,
+        qty:      d.qty,
+        act:      0,                // not yet activated
+        hwm:      d.entry,
+        stop_oid: d.order_id,       // initially the parent OTO ID
+      };
+      _trailStateSave();
       const mode = d.paper ? '[PAPER]' : '[LIVE]';
       showToast(`✅ ${mode} Trail order live! ${d.qty} × ${sym} — trail activates at 1R`, 'success');
       pushAlert(
@@ -2599,14 +2685,34 @@ setInterval(async()=>{
       if(sig) render(Object.assign({},sig,{current_price:d.price}));
 
       // ── Mode B: poll trail state on every price tick ──────────────────
-      if (_trailTradeId && _brokerEnabled) {
+      if (_trailState && _brokerEnabled) {
         try {
+          const ts = _trailState;
+          const params = new URLSearchParams({
+            price:    d.price,
+            qty:      ts.qty || 1,
+            sym:      ts.sym,
+            dir:      ts.dir,
+            entry:    ts.entry,
+            stop:     ts.stop,
+            risk:     ts.risk,
+            trail:    ts.trail,
+            act:      ts.act ? '1' : '0',
+            hwm:      ts.hwm,
+            stop_oid: ts.stop_oid || '',
+          });
           const tr = await fetch(
-            `/api/broker/trail-update/${encodeURIComponent(_trailTradeId)}` +
-            `?price=${d.price}&qty=${_trailQty}`
+            `/api/broker/trail-update/${encodeURIComponent(ts.trade_id)}?${params}`
           );
           const td = await tr.json();
           if (td.success) {
+            // Persist updated state so next poll (and page refreshes) are current
+            if (td.state) {
+              _trailState.act      = td.state.activated ? 1 : 0;
+              _trailState.hwm      = td.state.hwm;
+              _trailState.stop_oid = td.state.alpaca_stop_order_id || ts.stop_oid;
+              _trailStateSave();
+            }
             if (td.action === 'activated') {
               pushAlert(`🔁 Trail ACTIVATED at 1R — Alpaca native trailing stop now live | ID: ${(td.new_stop_order_id||'').slice(0,8)}…`, 'success');
               showToast('Trail activated at 1R — stop now trailing price', 'success');
@@ -2614,10 +2720,9 @@ setInterval(async()=>{
               const exitP = td.exit_price ? `$${Number(td.exit_price).toFixed(2)}` : 'market';
               pushAlert(`🏁 Trail STOP HIT — exited ${LS.sym} @ ${exitP}`, 'info');
               showToast(`Trail stop hit — exited @ ${exitP}`, 'info');
-              _trailTradeId = null;
-              _trailQty     = 0;
-              LS.inTrade    = false;
-              LS.signal     = null;
+              _trailStateClear();
+              LS.inTrade = false;
+              LS.signal  = null;
               doScan(true);
               refreshPositions();
             }

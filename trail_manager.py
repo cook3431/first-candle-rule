@@ -4,9 +4,14 @@ trail_manager.py — Trailing stop lifecycle manager.
 Singleton called by the Flask app on each price poll.
 Handles: activation check and exit detection for FIXED_DOLLAR trailing stops.
 Once activated, Alpaca manages stop movement natively.
+
+The primary entry point is on_price_update_stateless(), which is serverless-safe:
+all ActiveTrail state is passed in by the caller (from client-persisted data) and
+returned updated.  on_price_update() is kept for backwards compatibility and still
+works when the in-memory _trails dict is populated.
 """
 
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 from datetime import datetime
 from models import ActiveTrail, Direction
 from broker import activate_native_trail, get_order_status
@@ -26,15 +31,19 @@ class TrailManager:
     def get(self, trade_id: str) -> Optional[ActiveTrail]:
         return self._trails.get(trade_id)
 
-    def on_price_update(self, trade_id: str, current_price: float, qty: int) -> dict:
-        """
-        Called on each price update. Returns action taken:
-        {"action": "none"|"activated"|"exited", "exit_price": float|None}
-        """
-        trail = self._trails.get(trade_id)
-        if trail is None:
-            return {"action": "none"}
+    # ── Stateless (serverless-safe) ───────────────────────────────────────────
 
+    def on_price_update_stateless(
+        self, trail: ActiveTrail, current_price: float, qty: int
+    ) -> Tuple[dict, ActiveTrail]:
+        """
+        Serverless-safe version.  All trail state is passed in via `trail` and
+        returned (mutated) so the caller can persist it back to the client.
+        No in-memory _trails lookup — works correctly on every cold start.
+
+        Returns (result_dict, updated_trail) where result_dict has:
+          {"action": "none" | "activated" | "exited", ...extra keys}
+        """
         # Update high water mark
         if trail.direction == Direction.LONG:
             trail.high_water_mark = max(trail.high_water_mark, current_price)
@@ -56,17 +65,36 @@ class TrailManager:
                 trail.activated = True
                 trail.alpaca_stop_order_id = result["trail_order_id"]
                 trail.last_updated = datetime.now()
-                return {"action": "activated", "new_stop_order_id": result["trail_order_id"]}
+                return (
+                    {"action": "activated", "new_stop_order_id": result["trail_order_id"]},
+                    trail,
+                )
 
         # Phase 2: Check if Alpaca trail has fired (exit)
         if trail.activated and trail.alpaca_stop_order_id:
             status = get_order_status(trail.alpaca_stop_order_id)
             if status.get("success") and status.get("status") == "filled":
                 exit_price = status.get("filled_price")
-                self.deregister(trade_id)
-                return {"action": "exited", "exit_price": exit_price}
+                return {"action": "exited", "exit_price": exit_price}, trail
 
-        return {"action": "none"}
+        return {"action": "none"}, trail
+
+    # ── In-memory (legacy / warm-instance fast path) ──────────────────────────
+
+    def on_price_update(self, trade_id: str, current_price: float, qty: int) -> dict:
+        """
+        In-memory version.  Falls back gracefully if trail not registered
+        (e.g. cold-start) — callers should prefer on_price_update_stateless.
+        """
+        trail = self._trails.get(trade_id)
+        if trail is None:
+            return {"action": "none"}
+        result, updated = self.on_price_update_stateless(trail, current_price, qty)
+        if result.get("action") == "exited":
+            self.deregister(trade_id)
+        return result
+
+    # ── Shared helpers ────────────────────────────────────────────────────────
 
     def _calc_r(self, trail: ActiveTrail, current_price: float) -> float:
         if trail.initial_risk == 0:

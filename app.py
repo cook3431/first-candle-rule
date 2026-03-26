@@ -208,14 +208,61 @@ def api_broker_execute_trail():
 
 @app.route("/api/broker/trail-update/<trade_id>")
 def api_trail_update(trade_id):
-    """Poll trail state — activates trail at 1R, reports exit if trail fired."""
+    """
+    Stateless trail poll — all ActiveTrail state is passed via query params so
+    this works correctly on every Vercel cold start.
+
+    Required params: price, sym, dir (LONG|SHORT), entry, stop, trail
+    Optional params: qty, risk, act (0|1), hwm, stop_oid
+    Returns updated state for the client to persist between polls.
+    """
     from trail_manager import trail_manager
+    from models import ActiveTrail, Direction
+
     price = float(request.args.get("price", 0) or 0)
-    qty   = int(request.args.get("qty", 1) or 1)
     if not price:
         return jsonify({"success": False, "error": "price required"}), 400
-    result = trail_manager.on_price_update(trade_id, price, qty)
-    return jsonify({"success": True, **result})
+
+    qty      = int(float(request.args.get("qty",   1) or 1))
+    sym      = request.args.get("sym",      "").upper().strip()
+    direction= request.args.get("dir",      "LONG").upper()
+    entry    = float(request.args.get("entry",  0) or 0)
+    stop     = float(request.args.get("stop",   0) or 0)
+    trail_amt= float(request.args.get("trail",  0) or 0)
+    risk     = float(request.args.get("risk",   0) or 0) or abs(entry - stop)
+    trail_amt= trail_amt or risk
+    activated= request.args.get("act", "0") == "1"
+    hwm      = float(request.args.get("hwm",  entry) or entry)
+    stop_oid = request.args.get("stop_oid", "").strip()
+
+    if not sym or not entry or not stop:
+        return jsonify({"success": False, "error": "sym, entry, stop required"}), 400
+
+    trail = ActiveTrail(
+        trade_id             = trade_id,
+        symbol               = sym,
+        direction            = Direction.LONG if direction == "LONG" else Direction.SHORT,
+        entry_price          = entry,
+        initial_stop         = stop,
+        initial_risk         = risk,
+        trail_amount         = trail_amt,
+        current_stop         = stop,
+        high_water_mark      = hwm,
+        activated            = activated,
+        alpaca_stop_order_id = stop_oid,
+    )
+
+    result, updated = trail_manager.on_price_update_stateless(trail, price, qty)
+    return jsonify({
+        "success": True,
+        **result,
+        # Return updated state so client can persist it and pass back next poll
+        "state": {
+            "activated":            updated.activated,
+            "hwm":                  updated.high_water_mark,
+            "alpaca_stop_order_id": updated.alpaca_stop_order_id,
+        },
+    })
 
 
 @app.route("/api/portfolio-backtest")
