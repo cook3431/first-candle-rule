@@ -241,6 +241,7 @@
     <button class="mode-btn active" id="modeAnalysis" onclick="setMonMode('analysis')">📊 Analysis</button>
     <button class="mode-btn"        id="modeMonitor"  onclick="setMonMode('monitor')">📡 Live Monitor</button>
     <button class="mode-btn"        id="modeCompare"  onclick="setMonMode('compare')">⚖ Compare</button>
+    <button class="mode-btn"        id="modeLive"     onclick="setMonMode('live')">⚙ System</button>
   </div>
   <div class="spacer"></div>
   <!-- Risk per trade (configurable) -->
@@ -641,6 +642,95 @@
 
   </div><!-- /cmpResults -->
 </div><!-- /compareView -->
+
+<!-- ══════════════════════ LIVE SYSTEM VIEW ══════════════════════════════════ -->
+<div id="liveView" style="display:none;flex-direction:column;overflow-y:auto;padding:14px;gap:14px">
+
+  <!-- Header -->
+  <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">
+    <div>
+      <div style="font-size:16px;font-weight:800;color:var(--bright)">⚙ Autonomous System</div>
+      <div style="font-size:11px;color:var(--text-dim);margin-top:3px">
+        File-based state machine · cron-driven · no dashboard needed
+      </div>
+    </div>
+    <div style="display:flex;align-items:center;gap:10px">
+      <span id="liveLastRefresh" style="font-size:11px;color:var(--text-dim)"></span>
+      <button class="btn btn-gray btn-sm" onclick="loadSystemState()">↻ Refresh</button>
+    </div>
+  </div>
+
+  <!-- Phase + Supervisor -->
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+    <div class="range-card">
+      <div class="card-lbl">System Phase</div>
+      <div id="livePhase" style="font-size:22px;font-weight:800;color:var(--bright);margin-top:4px">—</div>
+      <div id="livePhaseTime" style="font-size:11px;color:var(--text-dim);margin-top:2px"></div>
+    </div>
+    <div class="range-card">
+      <div class="card-lbl">Supervisor</div>
+      <div id="liveSupervisor" style="font-size:13px;color:var(--text-dim);margin-top:6px">Not checked yet</div>
+    </div>
+  </div>
+
+  <!-- Active trade card (shown only when IN_TRADE) -->
+  <div id="liveTradeCard" class="range-card" style="display:none;border-left:3px solid var(--red)">
+    <div class="card-lbl" style="color:var(--red)">Active Trade</div>
+    <div id="liveTradeDetails" style="font-size:12px;line-height:1.7;margin-top:6px"></div>
+  </div>
+
+  <!-- Pending signals -->
+  <div class="range-card">
+    <div class="card-lbl">Pending Signals</div>
+    <div id="livePending" style="font-size:12px;color:var(--text-dim);margin-top:6px">None</div>
+  </div>
+
+  <!-- Today's summary -->
+  <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px">
+    <div class="range-card" style="text-align:center">
+      <div class="card-lbl">Trades Today</div>
+      <div id="liveTodayTrades" style="font-size:22px;font-weight:800;margin-top:4px">—</div>
+    </div>
+    <div class="range-card" style="text-align:center">
+      <div class="card-lbl">P&amp;L Today</div>
+      <div id="liveTodayPnl" style="font-size:22px;font-weight:800;margin-top:4px">—</div>
+    </div>
+    <div class="range-card" style="text-align:center">
+      <div class="card-lbl">Wins</div>
+      <div id="liveTodayWins" style="font-size:22px;font-weight:800;color:var(--green);margin-top:4px">—</div>
+    </div>
+    <div class="range-card" style="text-align:center">
+      <div class="card-lbl">Losses</div>
+      <div id="liveTodayLosses" style="font-size:22px;font-weight:800;color:var(--red);margin-top:4px">—</div>
+    </div>
+  </div>
+
+  <!-- Recent trades -->
+  <div class="range-card">
+    <div class="card-lbl">Recent Trades</div>
+    <div id="liveRecentTrades" style="font-size:12px;color:var(--text-dim);margin-top:6px">No trades yet</div>
+  </div>
+
+  <!-- Cron instructions -->
+  <details style="border:1px solid var(--border);border-radius:8px;padding:10px 14px">
+    <summary style="font-size:12px;font-weight:700;cursor:pointer;color:var(--text-dim)">Cron setup (click to expand)</summary>
+    <pre style="font-size:11px;color:var(--text-dim);margin-top:10px;white-space:pre-wrap;line-height:1.6"># Add to crontab -e  (TZ=America/New_York recommended)
+# Morning prep — 08:00 ET Mon-Fri
+0 8 * * 1-5 cd /path/to/trading-dashboard && python fcr_morning.py >> logs/morning.log 2>&1
+
+# First candle — 10:01 ET
+1 10 * * 1-5 cd /path/to/trading-dashboard && python fcr_first_candle.py >> logs/scanner.log 2>&1
+
+# Scanner — every 60s during kill zones (10:02–15:00 ET)
+2-59/1 10 * * 1-5 cd /path/to/trading-dashboard && python fcr_scanner.py >> logs/scanner.log 2>&1
+* 11 * * 1-5 cd /path/to/trading-dashboard && python fcr_scanner.py >> logs/scanner.log 2>&1
+* 12-14 * * 1-5 cd /path/to/trading-dashboard && python fcr_scanner.py >> logs/scanner.log 2>&1
+
+# Supervisor — every 30s (fires every minute, loops internally)
+* 9-16 * * 1-5 cd /path/to/trading-dashboard && python fcr_supervisor.py >> logs/supervisor.log 2>&1</pre>
+  </details>
+
+</div><!-- /liveView -->
 
 </div><!-- /app -->
 
@@ -1926,17 +2016,21 @@ function _monPriority(d) {
 }
 
 // ── Mode switch ───────────────────────────────────────────────────────────────
+let _liveRefreshTimer = null;
 function setMonMode(mode) {
   _monMode = mode;
-  const isMonitor = mode === 'monitor';
-  const isCompare = mode === 'compare';
+  const isMonitor  = mode === 'monitor';
+  const isCompare  = mode === 'compare';
   const isAnalysis = mode === 'analysis';
+  const isLive     = mode === 'live';
   document.getElementById('mainGrid').style.display      = isAnalysis ? '' : 'none';
   document.getElementById('monitorView').style.display   = isMonitor  ? 'flex' : 'none';
   document.getElementById('compareView').style.display   = isCompare  ? 'flex' : 'none';
+  document.getElementById('liveView').style.display      = isLive     ? 'flex' : 'none';
   document.getElementById('modeAnalysis').classList.toggle('active', isAnalysis);
   document.getElementById('modeMonitor').classList.toggle('active',  isMonitor);
   document.getElementById('modeCompare').classList.toggle('active',  isCompare);
+  document.getElementById('modeLive').classList.toggle('active',     isLive);
   document.getElementById('analysisSym').style.display   = isAnalysis ? '' : 'none';
   document.getElementById('scanInfo').style.display      = isAnalysis ? '' : 'none';
   document.getElementById('rfBtn').style.display         = isAnalysis ? '' : 'none';
@@ -1945,6 +2039,111 @@ function setMonMode(mode) {
     monScanAll(true);
   } else {
     _monStopTimer();
+  }
+  if (isLive) {
+    loadSystemState();
+    if (!_liveRefreshTimer) _liveRefreshTimer = setInterval(loadSystemState, 30_000);
+  } else {
+    if (_liveRefreshTimer) { clearInterval(_liveRefreshTimer); _liveRefreshTimer = null; }
+  }
+}
+
+// ── Live System State ─────────────────────────────────────────────────────────
+async function loadSystemState() {
+  try {
+    const r = await fetch('/api/system-state');
+    const d = await r.json();
+    _renderSystemState(d);
+    document.getElementById('liveLastRefresh').textContent = 'Updated ' + new Date().toLocaleTimeString();
+  } catch(e) {
+    document.getElementById('livePhase').textContent = 'ERROR';
+    document.getElementById('liveLastRefresh').textContent = 'Fetch failed: ' + e.message;
+  }
+}
+
+function _renderSystemState(d) {
+  const state  = d.state || {};
+  const phase  = state.phase || 'UNKNOWN';
+  const phaseColors = {
+    'IN_TRADE': 'var(--red)', 'SIGNAL_PENDING': 'var(--yellow)',
+    'SCANNING': 'var(--green)', 'MORNING_PREP': 'var(--blue)',
+    'DONE': 'var(--text-dim)', 'CLOSED': 'var(--text-dim)', 'IDLE': 'var(--text-dim)',
+  };
+  const phaseEl = document.getElementById('livePhase');
+  phaseEl.textContent = phase;
+  phaseEl.style.color = phaseColors[phase] || 'var(--bright)';
+
+  const updAt = state.updated_at ? new Date(state.updated_at).toLocaleTimeString() : '—';
+  document.getElementById('livePhaseTime').textContent = 'Updated ' + updAt;
+
+  // Supervisor heartbeat
+  const hb = d.supervisor_heartbeat;
+  const supEl = document.getElementById('liveSupervisor');
+  if (hb && hb.last_seen) {
+    const ago = Math.round((Date.now() - new Date(hb.last_seen)) / 1000);
+    supEl.textContent = ago < 90 ? `✅ OK — ${ago}s ago` : `⚠ Last seen ${ago}s ago`;
+    supEl.style.color = ago < 90 ? 'var(--green)' : 'var(--yellow)';
+  } else {
+    supEl.textContent = '⚪ No heartbeat — supervisor not running?';
+    supEl.style.color = 'var(--text-dim)';
+  }
+
+  // Active trade
+  const at = d.active_trade;
+  const tradeCard = document.getElementById('liveTradeCard');
+  if (at && at.qty > 0) {
+    tradeCard.style.display = '';
+    const rps = Math.abs(at.entry_price - at.stop_loss);
+    document.getElementById('liveTradeDetails').innerHTML = `
+      <b>${at.symbol}</b> ${at.direction} &nbsp;·&nbsp; Qty: ${at.qty} &nbsp;·&nbsp;
+      ${at.paper ? '<span style="color:var(--yellow)">PAPER</span>' : '<span style="color:var(--red)">LIVE</span>'}<br>
+      Entry: <b>$${(+at.entry_price).toFixed(2)}</b> &nbsp;
+      Stop: <b>$${(+at.stop_loss).toFixed(2)}</b> &nbsp;
+      ${at.trail_mode ? 'Trail: ' + (at.trail_activated ? '✅ active' : '⏳ activates at 1R') : 'TP: $' + (+at.take_profit).toFixed(2)}<br>
+      Grade: ${at.confidence_grade || '?'} (${at.confidence_score || '?'}) &nbsp;·&nbsp;
+      Risk: $${(rps * at.qty).toFixed(0)} &nbsp;·&nbsp; Since: ${at.entry_time ? new Date(at.entry_time).toLocaleTimeString() : '?'}
+    `;
+  } else {
+    tradeCard.style.display = 'none';
+  }
+
+  // Pending signals
+  const pend = d.pending_signals || [];
+  const pendEl = document.getElementById('livePending');
+  if (pend.length === 0) {
+    pendEl.textContent = 'None';
+  } else {
+    pendEl.innerHTML = pend.map(p =>
+      `<span style="color:var(--yellow)">${p.symbol}</span> ${p.direction} &nbsp;
+       entry=$${(+p.entry_price).toFixed(2)} &nbsp; grade=${p.confidence_grade}/${p.confidence_score} &nbsp;
+       expires=${p.expires_at ? new Date(p.expires_at).toLocaleTimeString() : '?'}`
+    ).join('<br>');
+  }
+
+  // Today
+  const td = d.today || {};
+  document.getElementById('liveTodayTrades').textContent = td.trades ?? '—';
+  const pnl = td.pnl ?? 0;
+  const pnlEl = document.getElementById('liveTodayPnl');
+  pnlEl.textContent = (pnl >= 0 ? '+' : '') + '$' + pnl.toFixed(2);
+  pnlEl.style.color = pnl > 0 ? 'var(--green)' : pnl < 0 ? 'var(--red)' : 'var(--bright)';
+  document.getElementById('liveTodayWins').textContent   = td.wins    ?? '—';
+  document.getElementById('liveTodayLosses').textContent = td.losses  ?? '—';
+
+  // Recent trades
+  const rt = d.recent_trades || [];
+  const rtEl = document.getElementById('liveRecentTrades');
+  if (rt.length === 0) {
+    rtEl.textContent = 'No trades yet';
+  } else {
+    rtEl.innerHTML = [...rt].reverse().map(t => {
+      const pnlCol = t.pnl > 0 ? 'var(--green)' : 'var(--red)';
+      return `<div style="display:flex;justify-content:space-between;padding:3px 0;border-bottom:1px solid var(--border)">
+        <span>${t.date} <b>${t.symbol}</b> ${t.direction}</span>
+        <span>exit=${t.exit_reason} &nbsp; R=${t.r_multiple >= 0 ? '+' : ''}${t.r_multiple}</span>
+        <span style="color:${pnlCol};font-weight:700">${t.pnl >= 0 ? '+' : ''}$${t.pnl.toFixed(2)}</span>
+      </div>`;
+    }).join('');
   }
 }
 

@@ -317,4 +317,76 @@ def api_portfolio_backtest():
         return jsonify({"status": "ERROR", "reason": str(e)}), 500
 
 
+
+# ─── Autonomous System State ─────────────────────────────────────────────────
+
+@app.route("/api/system-state")
+def api_system_state():
+    """Return current autonomous system state — read from state/ files."""
+    import json
+    from pathlib import Path
+
+    state_dir  = Path(ROOT) / "state"
+    trades_dir = Path(ROOT) / "trades"
+    result = {}
+
+    # System phase
+    try:
+        result["state"] = json.loads((state_dir / "system-state.json").read_text())
+    except Exception:
+        result["state"] = {"phase": "UNKNOWN"}
+
+    # Active trade
+    try:
+        at = json.loads((state_dir / "active-trade.json").read_text())
+        result["active_trade"] = at if at.get("qty", 0) > 0 else None
+    except Exception:
+        result["active_trade"] = None
+
+    # Pending signals
+    pending = []
+    try:
+        for f in (state_dir / "pending").glob("*.json"):
+            try:
+                pending.append(json.loads(f.read_text()))
+            except Exception:
+                pass
+    except Exception:
+        pass
+    result["pending_signals"] = pending
+
+    # Recent trades (last 5)
+    try:
+        idx = json.loads((trades_dir / "index.json").read_text())
+        result["recent_trades"] = idx.get("trades", [])[-5:]
+    except Exception:
+        result["recent_trades"] = []
+
+    # Today's P&L summary
+    try:
+        from datetime import datetime
+        import pytz
+        today = str(datetime.now(pytz.timezone("America/New_York")).date())
+        all_trades = json.loads((trades_dir / "index.json").read_text()).get("trades", [])
+        today_trades = [t for t in all_trades if t.get("date") == today]
+        result["today"] = {
+            "trades": len(today_trades),
+            "pnl":    round(sum(t.get("pnl", 0) for t in today_trades), 2),
+            "wins":   sum(1 for t in today_trades if t.get("pnl", 0) > 0),
+            "losses": sum(1 for t in today_trades if t.get("pnl", 0) <= 0),
+        }
+    except Exception:
+        result["today"] = {"trades": 0, "pnl": 0, "wins": 0, "losses": 0}
+
+    # Supervisor heartbeat
+    try:
+        result["supervisor_heartbeat"] = json.loads(
+            (state_dir / "supervisor-heartbeat.json").read_text()
+        )
+    except Exception:
+        result["supervisor_heartbeat"] = None
+
+    return jsonify(result)
+
+
 # Vercel needs the `app` object at module level — nothing else needed
