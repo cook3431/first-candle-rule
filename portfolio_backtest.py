@@ -11,6 +11,7 @@ Usage:
 """
 
 import sys, os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, date, time
 from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass, field
@@ -29,7 +30,7 @@ from live_scanner import (
     EST,
 )
 
-DEFAULT_STOCKS = ["QQQ", "SPY", "AAPL", "NVDA", "TSLA", "MSFT", "AMZN", "META", "GOOGL", "AMD"]
+DEFAULT_STOCKS = ["QQQ", "SPY", "NQ=F", "ES=F", "AAPL", "MSFT", "NVDA", "TSLA", "AMZN", "META"]
 
 RISK_PER_TRADE = 100.0
 TARGET_RR      = 3.0
@@ -170,38 +171,6 @@ def calc_r_multiple(entry: float, stop: float, exit_price: float, direction: str
 
 # ─── Data helpers ─────────────────────────────────────────────────────────────
 
-def fetch_intraday_candles_for_date(
-    symbol: str, trade_date: date, interval: str = "5m",
-) -> List[Candle]:
-    import yfinance as yf
-    ticker = yf.Ticker(symbol)
-    start  = (datetime.combine(trade_date, time(0, 0)) - timedelta(days=1)).strftime("%Y-%m-%d")
-    end    = (datetime.combine(trade_date, time(0, 0)) + timedelta(days=1)).strftime("%Y-%m-%d")
-    hist   = ticker.history(start=start, end=end, interval=interval)
-    candles = []
-    for ts, row in hist.iterrows():
-        dt = to_est_naive(ts)
-        if dt.date() == trade_date:
-            candles.append(row_to_candle(dt, row))
-    return candles
-
-
-def fetch_daily_candles_for_date(
-    symbol: str, trade_date: date, lookback: int = 10,
-) -> List[Candle]:
-    import yfinance as yf
-    start  = (datetime.combine(trade_date, time(0, 0)) - timedelta(days=lookback * 2)).strftime("%Y-%m-%d")
-    end    = datetime.combine(trade_date, time(0, 0)).strftime("%Y-%m-%d")
-    ticker = yf.Ticker(symbol)
-    hist   = ticker.history(start=start, end=end, interval="1d")
-    candles = []
-    for ts, row in hist.iterrows():
-        dt = to_est_naive(ts)
-        if dt.date() < trade_date:
-            candles.append(row_to_candle(dt, row))
-    return candles[-lookback:]
-
-
 def get_last_n_trading_days(n: int) -> List[date]:
     result = []
     cursor = date.today() - timedelta(days=1)
@@ -212,11 +181,66 @@ def get_last_n_trading_days(n: int) -> List[date]:
     return result
 
 
+def _hist_to_candles_by_date(hist) -> Dict[date, List[Candle]]:
+    """Convert a yfinance history DataFrame into {date: [Candle, ...]}."""
+    by_date: Dict[date, List[Candle]] = {}
+    for ts, row in hist.iterrows():
+        dt = to_est_naive(ts)
+        by_date.setdefault(dt.date(), []).append(row_to_candle(dt, row))
+    return by_date
+
+
+def fetch_symbol_data(symbol: str, trade_dates: List[date]):
+    """
+    Fetch ALL data for a symbol in 3 yfinance calls (daily, 30m, 5m).
+    Returns (daily_sorted, by_date_30m, by_date_5m).
+    daily_sorted: list of (date, Candle) sorted ascending.
+    """
+    import yfinance as yf
+    ticker    = yf.Ticker(symbol)
+    min_date  = min(trade_dates)
+    max_date  = max(trade_dates) + timedelta(days=1)
+    # Daily: go back 30 days for bias context
+    daily_start = (min_date - timedelta(days=30)).strftime("%Y-%m-%d")
+    daily_end   = max_date.strftime("%Y-%m-%d")
+    intra_start = min_date.strftime("%Y-%m-%d")
+    intra_end   = max_date.strftime("%Y-%m-%d")
+
+    hist_daily = ticker.history(start=daily_start, end=daily_end, interval="1d")
+    hist_30m   = ticker.history(start=intra_start, end=intra_end, interval="30m")
+    hist_5m    = ticker.history(start=intra_start, end=intra_end, interval="5m")
+
+    daily_sorted = []
+    for ts, row in hist_daily.iterrows():
+        dt = to_est_naive(ts)
+        daily_sorted.append((dt.date(), row_to_candle(dt, row)))
+    daily_sorted.sort(key=lambda x: x[0])
+
+    by_date_30m = _hist_to_candles_by_date(hist_30m)
+    by_date_5m  = _hist_to_candles_by_date(hist_5m)
+
+    return daily_sorted, by_date_30m, by_date_5m
+
+
 # ─── Per-day backtest ─────────────────────────────────────────────────────────
 
-def backtest_stock_day(symbol: str, trade_date: date) -> Optional[DayResult]:
-    """Run both Mode A and Mode B for one stock on one day."""
+def _run_day(
+    symbol:        str,
+    trade_date:    date,
+    daily_sorted:  List[Tuple],   # [(date, Candle), ...]
+    by_date_30m:   Dict,
+    by_date_5m:    Dict,
+) -> Optional[DayResult]:
+    """Run both Mode A and Mode B for one stock on one day (using pre-fetched data)."""
     if trade_date.weekday() == 0:   # Monday
+        return None
+
+    # Build daily candles available before trade_date
+    daily_candles = [c for d, c in daily_sorted if d < trade_date][-10:]
+    intraday_30min = by_date_30m.get(trade_date, [])
+    intraday_5min  = by_date_5m.get(trade_date, [])
+
+    if not daily_candles or not intraday_30min or not intraday_5min:
         return None
 
     market_cfg = get_market_config(symbol)
@@ -227,13 +251,6 @@ def backtest_stock_day(symbol: str, trade_date: date) -> Optional[DayResult]:
 
     strategy = FirstCandleStrategy(config)
     strategy.reset_daily_state(datetime.combine(trade_date, time(9, 30)))
-
-    daily_candles  = fetch_daily_candles_for_date(symbol, trade_date, lookback=10)
-    intraday_30min = fetch_intraday_candles_for_date(symbol, trade_date, interval="30m")
-    intraday_5min  = fetch_intraday_candles_for_date(symbol, trade_date, interval="5m")
-
-    if not daily_candles or not intraday_30min or not intraday_5min:
-        return None
 
     confirmed_daily = daily_candles[-5:]
     strategy.determine_bias(confirmed_daily)
@@ -358,6 +375,25 @@ def aggregate_stats(trades: List[TradeResult], mode: str) -> dict:
 
 # ─── Portfolio runner ─────────────────────────────────────────────────────────
 
+def _backtest_one_symbol(symbol: str, trading_days: List[date]) -> List[DayResult]:
+    """Fetch all data for one symbol in 3 API calls, then run all days."""
+    try:
+        daily_sorted, by_date_30m, by_date_5m = fetch_symbol_data(symbol, trading_days)
+    except Exception as e:
+        print(f"  ⚠ {symbol} data fetch failed: {e}")
+        return []
+
+    results = []
+    for trade_date in trading_days:
+        try:
+            r = _run_day(symbol, trade_date, daily_sorted, by_date_30m, by_date_5m)
+            if r is not None:
+                results.append(r)
+        except Exception as e:
+            print(f"  ⚠ {symbol} {trade_date}: {e}")
+    return results
+
+
 def run_portfolio_backtest(
     stocks: List[str] = None,
     days:   int       = 10,
@@ -372,15 +408,15 @@ def run_portfolio_backtest(
     trading_days      = get_last_n_trading_days(days)
     all_day_results: List[DayResult] = []
 
-    for symbol in stocks:
-        for trade_date in trading_days:
+    # Fetch each symbol in parallel (3 API calls per symbol instead of 30)
+    max_workers = min(len(stocks), 10)
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {pool.submit(_backtest_one_symbol, sym, trading_days): sym for sym in stocks}
+        for future in as_completed(futures):
             try:
-                result = backtest_stock_day(symbol, trade_date)
-                if result is not None:
-                    all_day_results.append(result)
+                all_day_results.extend(future.result())
             except Exception as e:
-                print(f"  ⚠ {symbol} {trade_date}: {e}")
-                continue
+                print(f"  ⚠ {futures[future]}: {e}")
 
     mode_a_stats = aggregate_stats([r.mode_a for r in all_day_results if r.mode_a], "A")
     mode_b_stats = aggregate_stats([r.mode_b for r in all_day_results if r.mode_b], "B")
