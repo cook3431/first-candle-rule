@@ -658,11 +658,16 @@ const LS = {
 };
 
 // ─── Backtest result cache (localStorage) ────────────────────────────────────
-// Historical backtest days never change once the market closes, so we cache
-// them indefinitely. Today's date is never cached (result still forming).
-// Key format: "SYM|YYYY-MM-DD"  Value: full API response object
-const _BT_CACHE_KEY = 'btCache_v3';
-const _BT_CACHE_MAX = 220;   // ~2 years of data for 10 symbols before pruning
+// btCache_v3  — full API response (price_path + signal + levels).
+//               Used by the interactive single-stock chart when a day is clicked.
+// portCache_v1 — slimmed response (status + signal.risk_reward only, ~250 bytes).
+//               Used by the 10×10 portfolio grid. 23KB total vs 560KB for full data.
+// Historical days are cached indefinitely; today is never cached.
+
+const _BT_CACHE_KEY   = 'btCache_v3';
+const _BT_CACHE_MAX   = 220;
+const _PORT_CACHE_KEY = 'portCache_v1';
+const _PORT_CACHE_MAX = 300;
 
 function _btCacheGet(sym, dateStr) {
   try {
@@ -673,19 +678,39 @@ function _btCacheGet(sym, dateStr) {
 
 function _btCacheSet(sym, dateStr, data) {
   const today = new Date().toISOString().split('T')[0];
-  if (dateStr >= today) return;   // never cache today — market may still be open
+  if (dateStr >= today) return;
   try {
     const c = JSON.parse(localStorage.getItem(_BT_CACHE_KEY) || '{}');
     c[sym + '|' + dateStr] = data;
-    // Prune oldest keys if over limit
     const keys = Object.keys(c);
     if (keys.length > _BT_CACHE_MAX) {
       keys.sort().slice(0, keys.length - _BT_CACHE_MAX).forEach(k => delete c[k]);
     }
     localStorage.setItem(_BT_CACHE_KEY, JSON.stringify(c));
-  } catch(e) {
-    // Storage quota exceeded — clear stale cache and move on
+  } catch {
     try { localStorage.removeItem(_BT_CACHE_KEY); } catch {}
+  }
+}
+
+/** Slim a full API response down to just what the portfolio grid needs. */
+function _portSlim(data) {
+  return {
+    status:  data.status,
+    outcome: data.outcome,
+    signal:  data.signal ? { risk_reward: data.signal.risk_reward } : null,
+  };
+}
+
+/** Flush an in-memory store object to localStorage with pruning. */
+function _portCacheFlush(store) {
+  try {
+    const keys = Object.keys(store);
+    if (keys.length > _PORT_CACHE_MAX) {
+      keys.sort().slice(0, keys.length - _PORT_CACHE_MAX).forEach(k => delete store[k]);
+    }
+    localStorage.setItem(_PORT_CACHE_KEY, JSON.stringify(store));
+  } catch {
+    try { localStorage.removeItem(_PORT_CACHE_KEY); } catch {}
   }
 }
 
@@ -2096,47 +2121,82 @@ function calcPortPnL(d) {
   return st === 'WIN' ? +(100 * rr).toFixed(2) : -100;
 }
 
+// Debounce helper: coalesces rapid re-renders into a single call.
+let _portRenderTimer = null;
+function _schedulePortRender() {
+  clearTimeout(_portRenderTimer);
+  _portRenderTimer = setTimeout(renderPortfolioTable, 80);
+}
+
 function loadPortfolioData() {
   _portDays  = getBacktestDays(10);
   _portData  = {};
   _portTotal = PORT_SYMS.length * _portDays.length;  // 100
 
-  // ── Seed from cache first — instant for all historical days ──────────────
+  // ── Read BOTH caches ONCE — avoids 100 separate localStorage.getItem calls ──
+  let portStore = {};
+  let btStore   = {};
+  try { portStore = JSON.parse(localStorage.getItem(_PORT_CACHE_KEY) || '{}'); } catch {}
+  try { btStore   = JSON.parse(localStorage.getItem(_BT_CACHE_KEY)   || '{}'); } catch {}
+  const today = new Date().toISOString().split('T')[0];
+
+  // ── Seed from slim portfolio cache (preferred) or full chart cache ────────
   const toFetch = [];
   for (const sym of PORT_SYMS) {
     for (const d of _portDays) {
-      const ds     = fmtDate(d);
-      const key    = portKey(sym, ds);
-      const cached = _btCacheGet(sym, ds);
-      if (cached) {
-        _portData[key] = cached;
+      const ds  = fmtDate(d);
+      const key = portKey(sym, ds);
+      const hit = portStore[sym + '|' + ds] || btStore[sym + '|' + ds] || null;
+      if (hit) {
+        _portData[key] = hit;
       } else {
         toFetch.push({ sym, ds, key });
       }
     }
   }
-  _portLoaded = _portTotal - toFetch.length;   // cached entries count as loaded
-  renderPortfolioTable();                       // render immediately with whatever we have
+  _portLoaded = _portTotal - toFetch.length;
+  renderPortfolioTable();
 
-  if (!toFetch.length) return;  // everything was cached — done!
+  if (!toFetch.length) return;  // everything cached — done!
 
-  // ── Fetch only the missing entries ───────────────────────────────────────
-  toFetch.forEach(({ sym, ds, key }, i) => {
-    setTimeout(async () => {
-      try {
-        const r = await fetch(
-          `/api/backtest?symbol=${encodeURIComponent(sym)}&date=${ds}&account=100000&interval=5m`
-        );
-        const data = await r.json();
-        _portData[key] = data;
-        _btCacheSet(sym, ds, data);    // cache for future loads
-      } catch(e) {
-        _portData[key] = { status: 'ERROR' };
-      }
-      _portLoaded++;
-      renderPortfolioTable();
-    }, i * 160);
-  });
+  // ── Fetch missing cells: 5 concurrent, batch-write cache every 5 done ────
+  const CONCURRENCY = 5;
+  let idx = 0, pending = 0, written = 0;
+
+  function launchNext() {
+    while (pending < CONCURRENCY && idx < toFetch.length) {
+      const { sym, ds, key } = toFetch[idx++];
+      pending++;
+      fetch(`/api/backtest?symbol=${encodeURIComponent(sym)}&date=${ds}&account=100000&interval=5m`)
+        .then(r => r.json())
+        .then(data => {
+          _portData[key] = data;
+          if (ds < today) {
+            portStore[sym + '|' + ds] = _portSlim(data);   // slim → portCache_v1
+            btStore[sym   + '|' + ds] = data;              // full  → btCache_v3
+            written++;
+            if (written % CONCURRENCY === 0 || idx >= toFetch.length) {
+              _portCacheFlush(portStore);                   // batch write every 5
+              try {
+                const bkeys = Object.keys(btStore);
+                if (bkeys.length > _BT_CACHE_MAX) {
+                  bkeys.sort().slice(0, bkeys.length - _BT_CACHE_MAX).forEach(k => delete btStore[k]);
+                }
+                localStorage.setItem(_BT_CACHE_KEY, JSON.stringify(btStore));
+              } catch { try { localStorage.removeItem(_BT_CACHE_KEY); } catch {} }
+            }
+          }
+        })
+        .catch(() => { _portData[key] = { status: 'ERROR' }; })
+        .finally(() => {
+          pending--;
+          _portLoaded++;
+          _schedulePortRender();   // debounced — coalesces concurrent completions
+          launchNext();
+        });
+    }
+  }
+  launchNext();
 }
 
 function renderPortfolioTable() {
