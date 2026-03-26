@@ -547,6 +547,64 @@ const LS = {
   },
 };
 
+// ─── Backtest result cache (localStorage) ────────────────────────────────────
+// Historical backtest days never change once the market closes, so we cache
+// them indefinitely. Today's date is never cached (result still forming).
+// Key format: "SYM|YYYY-MM-DD"  Value: full API response object
+const _BT_CACHE_KEY = 'btCache_v3';
+const _BT_CACHE_MAX = 220;   // ~2 years of data for 10 symbols before pruning
+
+function _btCacheGet(sym, dateStr) {
+  try {
+    const c = JSON.parse(localStorage.getItem(_BT_CACHE_KEY) || '{}');
+    return c[sym + '|' + dateStr] || null;
+  } catch { return null; }
+}
+
+function _btCacheSet(sym, dateStr, data) {
+  const today = new Date().toISOString().split('T')[0];
+  if (dateStr >= today) return;   // never cache today — market may still be open
+  try {
+    const c = JSON.parse(localStorage.getItem(_BT_CACHE_KEY) || '{}');
+    c[sym + '|' + dateStr] = data;
+    // Prune oldest keys if over limit
+    const keys = Object.keys(c);
+    if (keys.length > _BT_CACHE_MAX) {
+      keys.sort().slice(0, keys.length - _BT_CACHE_MAX).forEach(k => delete c[k]);
+    }
+    localStorage.setItem(_BT_CACHE_KEY, JSON.stringify(c));
+  } catch(e) {
+    // Storage quota exceeded — clear stale cache and move on
+    try { localStorage.removeItem(_BT_CACHE_KEY); } catch {}
+  }
+}
+
+// ─── Adaptive scan scheduling ─────────────────────────────────────────────────
+// During kill zone (15:00–16:00 BST): scan every 60 s — signals can fire any moment
+// First candle forming (14:30–15:00 BST): every 2 min — watching but no entries yet
+// Pre-market / post-close: every 5 min — nothing happening, save API calls
+// In trade: every 30 s — price tracking matters
+function _nextScanDelay() {
+  if (LS.inTrade) return 30_000;
+  const now   = new Date();
+  const loStr = now.toLocaleString('en-GB', {timeZone:'Europe/London', hour:'2-digit', minute:'2-digit', hour12:false});
+  const [lh, lm] = loStr.split(':').map(Number);
+  const lMins = lh * 60 + lm;
+  if (lMins >= 15 * 60 && lMins < 16 * 60) return 60_000;    // kill zone
+  if (lMins >= 14 * 60 && lMins < 15 * 60) return 120_000;   // first candle
+  return 300_000;                                              // pre/post market
+}
+
+let _scanTimer = null;
+function _scheduleScan() {
+  clearTimeout(_scanTimer);
+  const delay = _nextScanDelay();
+  _scanTimer = setTimeout(async () => {
+    await doScan(false);
+    _scheduleScan();   // reschedule after each scan with fresh delay
+  }, delay);
+}
+
 // Alerts live in sessionStorage (cleared when tab closes)
 function getAlerts() { try { return JSON.parse(sessionStorage.getItem('alerts')||'[]'); } catch{ return []; } }
 function saveAlerts(a){ sessionStorage.setItem('alerts', JSON.stringify(a.slice(0,60))); }
@@ -1254,10 +1312,24 @@ function initBacktestDays() {
 }
 
 async function loadBacktest(dateStr, btn) {
-  // Highlight selected button
   document.querySelectorAll('#btDayBtns .sym-btn').forEach(b => b.classList.remove('active'));
   if (btn) btn.classList.add('active');
   _btActive = dateStr;
+
+  // ── Cache check — historical days never change ────────────────────────────
+  const cached = _btCacheGet(LS.sym, dateStr);
+  if (cached) {
+    if (_btInterval === '5m' && !_btPnLStore[dateStr]) {
+      _btPnLStore[dateStr] = cached;
+      renderPnLSummary();
+    }
+    if (_btActive === dateStr) {
+      document.getElementById('btLoading').style.display = 'none';
+      document.getElementById('btResult').style.display  = '';
+      renderBacktest(cached);
+    }
+    return;
+  }
 
   document.getElementById('btLoading').style.display = '';
   document.getElementById('btResult').style.display  = 'none';
@@ -1266,7 +1338,7 @@ async function loadBacktest(dateStr, btn) {
     const url = `/api/backtest?symbol=${encodeURIComponent(LS.sym)}&date=${dateStr}&account=${LS.acct}&interval=${_btInterval}`;
     const r   = await fetch(url);
     const d   = await r.json();
-    // Seed the P&L store if this was a 5m fetch (same data used for P&L)
+    _btCacheSet(LS.sym, dateStr, d);   // store for next time
     if (_btInterval === '5m' && !_btPnLStore[dateStr]) {
       _btPnLStore[dateStr] = d;
       renderPnLSummary();
@@ -1867,34 +1939,46 @@ function calcPortPnL(d) {
 }
 
 function loadPortfolioData() {
-  _portDays   = getBacktestDays(10);
-  _portData   = {};
-  _portLoaded = 0;
-  _portTotal  = PORT_SYMS.length * _portDays.length;  // 100
+  _portDays  = getBacktestDays(10);
+  _portData  = {};
+  _portTotal = PORT_SYMS.length * _portDays.length;  // 100
 
-  // Show loading state immediately
-  renderPortfolioTable();
-
-  let idx = 0;
+  // ── Seed from cache first — instant for all historical days ──────────────
+  const toFetch = [];
   for (const sym of PORT_SYMS) {
     for (const d of _portDays) {
-      const ds  = fmtDate(d);
-      const key = portKey(sym, ds);
-      const i   = idx++;
-      setTimeout(async () => {
-        try {
-          const r = await fetch(
-            `/api/backtest?symbol=${encodeURIComponent(sym)}&date=${ds}&account=100000&interval=5m`
-          );
-          _portData[key] = await r.json();
-        } catch(e) {
-          _portData[key] = { status: 'ERROR' };
-        }
-        _portLoaded++;
-        renderPortfolioTable();
-      }, i * 160);
+      const ds     = fmtDate(d);
+      const key    = portKey(sym, ds);
+      const cached = _btCacheGet(sym, ds);
+      if (cached) {
+        _portData[key] = cached;
+      } else {
+        toFetch.push({ sym, ds, key });
+      }
     }
   }
+  _portLoaded = _portTotal - toFetch.length;   // cached entries count as loaded
+  renderPortfolioTable();                       // render immediately with whatever we have
+
+  if (!toFetch.length) return;  // everything was cached — done!
+
+  // ── Fetch only the missing entries ───────────────────────────────────────
+  toFetch.forEach(({ sym, ds, key }, i) => {
+    setTimeout(async () => {
+      try {
+        const r = await fetch(
+          `/api/backtest?symbol=${encodeURIComponent(sym)}&date=${ds}&account=100000&interval=5m`
+        );
+        const data = await r.json();
+        _portData[key] = data;
+        _btCacheSet(sym, ds, data);    // cache for future loads
+      } catch(e) {
+        _portData[key] = { status: 'ERROR' };
+      }
+      _portLoaded++;
+      renderPortfolioTable();
+    }, i * 160);
+  });
 }
 
 function renderPortfolioTable() {
@@ -1941,11 +2025,15 @@ function renderPortfolioTable() {
   const grandCol    = grandPnL >= 0 ? 'var(--green)' : 'var(--red)';
   const grandSign   = grandPnL >= 0 ? '+' : '';
 
-  // ── Loading counter ──
+  // ── Loading counter (shows cache hits) ──
   if (cntEl) {
-    cntEl.innerHTML = still
-      ? `<span class="spinner" style="width:8px;height:8px;border-width:1.5px"></span>&nbsp;${_portLoaded}/${_portTotal}`
-      : `<span style="color:var(--green)">✓ ${_portTotal} loaded</span>`;
+    const cacheHits = Object.keys(_portData).length;
+    if (still) {
+      cntEl.innerHTML = `<span class="spinner" style="width:8px;height:8px;border-width:1.5px"></span>&nbsp;${_portLoaded}/${_portTotal}`;
+    } else {
+      const allCached = _portTotal - Object.keys(_portData).filter(k => _portData[k]?.status === 'ERROR').length;
+      cntEl.innerHTML = `<span style="color:var(--green)">✓ ${_portTotal} loaded</span>`;
+    }
   }
 
   // ── Summary strip ──
@@ -2055,8 +2143,7 @@ function renderPortfolioTable() {
 // Check broker status — enables auto-execute toggle if Alpaca keys are configured
 checkBrokerStatus();
 
-// Refresh positions every 30 s when broker is active
-setInterval(() => { if (_brokerEnabled) refreshPositions(); }, 30_000);
+// (positions polling is in the boot section, gated on inTrade || autoExecute)
 
 // Populate London-time labels immediately
 initTimeLabels();
@@ -2070,13 +2157,10 @@ setTimeout(initBacktestDays, 400);
 // Load portfolio backtest (staggered so it doesn't compete with single-stock backtest)
 setTimeout(loadPortfolioData, 1200);
 
-// Initial scan
-doScan();
+// Initial scan then adaptive schedule (60 s kill zone, 5 min pre/post-market)
+doScan().then(() => _scheduleScan());
 
-// Auto-poll every 60 s
-setInterval(()=>doScan(false), 60_000);
-
-// If in trade, also update price every 30 s
+// Price update: every 30 s only while in an active trade
 setInterval(async()=>{
   if(!LS.inTrade) return;
   try {
@@ -2088,6 +2172,11 @@ setInterval(async()=>{
       if(sig) render(Object.assign({},sig,{current_price:d.price}));
     }
   } catch(e){}
+}, 30_000);
+
+// Positions: every 30 s only when broker is active and relevant
+setInterval(() => {
+  if (_brokerEnabled && (LS.inTrade || LS.autoExecute)) refreshPositions();
 }, 30_000);
 </script>
 </body>
