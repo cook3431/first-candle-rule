@@ -432,8 +432,8 @@
   <div id="portfolioSection" class="card" style="flex-shrink:0">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;flex-wrap:wrap;gap:8px">
       <div>
-        <div class="card-lbl" style="margin-bottom:3px">📊 Portfolio Backtest — All 10 Stocks × 10 Days</div>
-        <div style="font-size:11px;color:var(--text-dim)">$100 risked per trade &nbsp;·&nbsp; WIN = +$100 × R:R &nbsp;·&nbsp; LOSS = −$100</div>
+        <div class="card-lbl" style="margin-bottom:3px">📊 Mode A — Fixed TP/SL &nbsp;·&nbsp; All 10 Stocks × 10 Days</div>
+        <div style="font-size:11px;color:var(--text-dim)">$100 risked per trade &nbsp;·&nbsp; Fixed 3R target &nbsp;·&nbsp; Set &amp; walk away</div>
       </div>
       <div style="display:flex;align-items:center;gap:8px">
         <span id="portLoadCounter" style="font-size:10px;color:var(--text-dim)">–</span>
@@ -454,6 +454,30 @@
         <span class="spinner"></span>&nbsp; Fetching all 100 combinations…
       </div>
     </div>
+  </div>
+
+  <!-- ══════════════ PORTFOLIO BACKTEST — MODE B (TRAILING STOP) ════════════ -->
+  <div id="portBSection" class="card" style="flex-shrink:0;border-color:var(--green-d)">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;flex-wrap:wrap;gap:8px">
+      <div>
+        <div class="card-lbl" style="margin-bottom:3px">📈 Mode B — Trailing Stop &nbsp;·&nbsp; All 10 Stocks × 10 Days</div>
+        <div style="font-size:11px;color:var(--text-dim)">$100 max risk &nbsp;·&nbsp; Trail activates at 1R &nbsp;·&nbsp; Trail = initial risk &nbsp;·&nbsp; No fixed TP</div>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px">
+        <span id="portBStatus" style="font-size:10px;color:var(--text-dim)">Not yet run</span>
+        <button class="btn btn-gray btn-sm" onclick="loadPortBData()">▶ Run</button>
+      </div>
+    </div>
+
+    <!-- Summary strip -->
+    <div id="portBSummary" style="background:var(--bg);border:1px solid var(--border);border-radius:8px;overflow:hidden;margin-bottom:12px">
+      <div style="text-align:center;padding:14px;color:var(--text-dim);font-size:12px">
+        Click <strong>▶ Run</strong> to simulate trailing stop exits — takes ~60s first time, cached for 6 hours
+      </div>
+    </div>
+
+    <!-- Matrix table -->
+    <div class="port-table-wrap" id="portBTableWrap"></div>
   </div>
 
 </div><!-- /left -->
@@ -2269,6 +2293,176 @@ function renderPortfolioTable() {
   el.innerHTML = html;
 }
 
+// ─── Mode B Portfolio Table ──────────────────────────────────────────────────
+
+function loadPortBData() {
+  if (_cmpData) { renderPortBTable(_cmpData); return; }
+  document.getElementById('portBStatus').textContent = 'Running ~60s…';
+  document.getElementById('portBSummary').innerHTML =
+    '<div style="text-align:center;padding:14px;color:var(--text-dim);font-size:12px">' +
+    '<span class="spinner"></span>&nbsp; Running 10 stocks × 10 days — please wait…</div>';
+  runCompareBacktest(false);   // shared data; renderCompare() will call renderPortBTable()
+}
+
+function renderPortBTable(data) {
+  if (!data) return;
+  const summEl  = document.getElementById('portBSummary');
+  const tableEl = document.getElementById('portBTableWrap');
+  const statEl  = document.getElementById('portBStatus');
+  if (!tableEl) return;
+
+  // Build lookup maps from trade_log
+  const bMap = {}, aMap = {};
+  (data.trade_log || []).forEach(t => {
+    if (t.mode === 'B') bMap[t.symbol + '|' + t.date] = t;
+    else                aMap[t.symbol + '|' + t.date] = t;
+  });
+
+  const days      = getBacktestDays(10);
+  const dateCols  = days.map(fmtDate);
+  const dayLabels = days.map(d => d.toLocaleDateString('en-GB', {weekday:'short',day:'numeric',month:'short'}));
+
+  // Aggregate Mode B totals
+  let totTrades = 0, totWins = 0, totLosses = 0, grandBPnL = 0;
+  const rowTot = {}, colTot = {};
+  PORT_SYMS.forEach(s  => { rowTot[s]  = {pnl:0,trades:0,wins:0,losses:0}; });
+  dateCols.forEach(ds  => { colTot[ds] = {pnl:0,trades:0}; });
+
+  PORT_SYMS.forEach(sym => {
+    dateCols.forEach(ds => {
+      const t = bMap[sym + '|' + ds];
+      if (!t) return;
+      rowTot[sym].pnl    += t.pnl;  rowTot[sym].trades++;
+      colTot[ds].pnl     += t.pnl;  colTot[ds].trades++;
+      grandBPnL += t.pnl;  totTrades++;
+      if (t.pnl > 0) { totWins++; rowTot[sym].wins++; }
+      else            { totLosses++; rowTot[sym].losses++; }
+    });
+  });
+
+  // Compute Mode A column totals from existing _portData for delta row
+  const colTotA = {};
+  dateCols.forEach(ds => {
+    colTotA[ds] = 0;
+    PORT_SYMS.forEach(sym => {
+      const ap = calcPortPnL(_portData[portKey(sym, ds)]);
+      if (ap !== null) colTotA[ds] += ap;
+    });
+  });
+  let grandAPnL = Object.values(colTotA).reduce((s, v) => s + v, 0);
+
+  const winRate = totTrades > 0 ? (totWins / totTrades * 100) : 0;
+  const grandCol = grandBPnL >= 0 ? 'var(--green)' : 'var(--red)';
+  const grandSign = grandBPnL >= 0 ? '+' : '';
+  const mb = data.mode_b || {};
+
+  if (statEl) statEl.textContent = `${data.start_date} → ${data.end_date}`;
+
+  // Summary strip
+  if (summEl && totTrades > 0) {
+    const wrCol  = winRate >= 60 ? 'var(--green)' : winRate >= 40 ? 'var(--yellow)' : 'var(--red)';
+    const exits  = Object.entries(mb.exit_breakdown || {}).map(([k,v]) => `${k}:${v}`).join(' · ');
+    const avgR   = mb.avg_r_multiple != null ? mb.avg_r_multiple.toFixed(2) : '–';
+    const expect = mb.expectancy    != null ? (mb.expectancy >= 0 ? '+' : '') + '$' + Math.abs(mb.expectancy).toFixed(0) : '–';
+    summEl.innerHTML = `
+      <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:0;text-align:center">
+        <div style="padding:9px 8px;border-right:1px solid var(--border)">
+          <div style="font-size:17px;font-weight:800;color:var(--bright)">${totTrades}</div>
+          <div style="font-size:9px;text-transform:uppercase;letter-spacing:.06em;color:var(--text-dim);margin-top:2px">Trades</div>
+          <div style="font-size:9px;color:var(--text-dim)">${exits||'–'}</div>
+        </div>
+        <div style="padding:9px 8px;border-right:1px solid var(--border)">
+          <div style="font-size:17px;font-weight:800">
+            <span style="color:var(--green)">${totWins}W</span>
+            <span style="font-size:13px;color:var(--text-dim)"> / </span>
+            <span style="color:var(--red)">${totLosses}L</span>
+          </div>
+          <div style="font-size:9px;text-transform:uppercase;letter-spacing:.06em;color:var(--text-dim);margin-top:2px">Win / Loss</div>
+        </div>
+        <div style="padding:9px 8px;border-right:1px solid var(--border)">
+          <div style="font-size:17px;font-weight:800;color:${wrCol}">${winRate.toFixed(0)}%</div>
+          <div style="font-size:9px;text-transform:uppercase;letter-spacing:.06em;color:var(--text-dim);margin-top:2px">Win rate</div>
+          <div style="font-size:9px;color:var(--text-dim)">Avg R: ${avgR}</div>
+        </div>
+        <div style="padding:9px 8px;border-right:1px solid var(--border)">
+          <div style="font-size:17px;font-weight:800;color:var(--text)">$${totTrades * 100}</div>
+          <div style="font-size:9px;text-transform:uppercase;letter-spacing:.06em;color:var(--text-dim);margin-top:2px">Total risked</div>
+          <div style="font-size:9px;color:var(--text-dim)">Expectancy: ${expect}/trade</div>
+        </div>
+        <div style="padding:9px 8px">
+          <div style="font-size:17px;font-weight:800;color:${grandCol}">${grandSign}$${Math.abs(grandBPnL).toFixed(0)}</div>
+          <div style="font-size:9px;text-transform:uppercase;letter-spacing:.06em;color:var(--text-dim);margin-top:2px">Net P&amp;L</div>
+          <div style="font-size:9px;color:${grandCol};font-weight:700">${grandSign}${(grandBPnL / (totTrades*100) * 100).toFixed(1)}% on capital risked</div>
+        </div>
+      </div>`;
+  } else if (summEl && totTrades === 0) {
+    summEl.innerHTML = '<div style="text-align:center;padding:14px;color:var(--text-dim);font-size:12px">No signals generated in this period</div>';
+  }
+
+  // Exit reason badge
+  const exitBadge = r => {
+    const c = r === 'TRAIL' ? 'var(--green)' : r === 'EOD' ? 'var(--yellow)' : 'var(--red)';
+    return `<span style="font-size:8px;color:${c}">${r}</span>`;
+  };
+
+  // Matrix table
+  let html = `<table class="port-table">
+    <thead><tr>
+      <th>Stock</th>
+      ${dayLabels.map(l => `<th>${l}</th>`).join('')}
+      <th>10-Day Total</th>
+    </tr></thead><tbody>`;
+
+  PORT_SYMS.forEach(sym => {
+    const label = PORT_LABELS[sym] || sym;
+    const row   = rowTot[sym];
+    const rCol  = row.trades > 0 ? (row.pnl >= 0 ? 'var(--green)' : 'var(--red)') : 'var(--text-dim)';
+    const rSign = row.pnl >= 0 ? '+' : '';
+    html += `<tr><td class="port-sym">${label}</td>`;
+    dateCols.forEach(ds => {
+      const t = bMap[sym + '|' + ds];
+      if (!t) {
+        html += `<td><span style="color:var(--text-dim);font-size:10px">–</span></td>`;
+      } else {
+        const c = t.pnl >= 0 ? 'var(--green)' : 'var(--red)';
+        const s = t.pnl >= 0 ? '+' : '';
+        html += `<td><span style="color:${c};font-weight:700">${s}$${Math.abs(t.pnl).toFixed(0)}</span><br>${exitBadge(t.reason)}</td>`;
+      }
+    });
+    html += `<td class="port-total" style="color:${rCol}">
+      ${row.trades > 0
+        ? `<strong>${rSign}$${Math.abs(row.pnl).toFixed(0)}</strong><br><span style="font-size:9px;color:var(--text-dim)">${row.wins}W / ${row.losses}L</span>`
+        : `<span style="color:var(--text-dim)">–</span>`}
+    </td></tr>`;
+  });
+
+  // Day totals row
+  html += `<tr class="port-col-total"><td class="port-sym">Day Totals</td>`;
+  dateCols.forEach(ds => {
+    const col = colTot[ds];
+    const cCol = col.trades > 0 ? (col.pnl >= 0 ? 'var(--green)' : 'var(--red)') : 'var(--text-dim)';
+    const cSign = col.pnl >= 0 ? '+' : '';
+    html += `<td style="color:${cCol}">${col.trades > 0 ? `${cSign}$${Math.abs(col.pnl).toFixed(0)}` : '–'}</td>`;
+  });
+  html += `<td class="port-grand" style="color:${grandCol}">${grandSign}$${Math.abs(grandBPnL).toFixed(0)}</td></tr>`;
+
+  // Delta vs Mode A row
+  html += `<tr class="port-col-total" style="border-top:2px solid var(--border)"><td class="port-sym" style="color:var(--yellow);font-size:10px">Δ vs Mode A</td>`;
+  dateCols.forEach(ds => {
+    const delta = (colTot[ds]?.pnl || 0) - (colTotA[ds] || 0);
+    const dc = delta > 0.5 ? 'var(--green)' : delta < -0.5 ? 'var(--red)' : 'var(--text-dim)';
+    const ds2 = delta >= 0 ? '+' : '';
+    html += `<td style="color:${dc};font-size:10px;font-weight:700">${ds2}$${Math.abs(delta).toFixed(0)}</td>`;
+  });
+  const grandDelta = grandBPnL - grandAPnL;
+  const gdCol  = grandDelta > 0.5 ? 'var(--green)' : grandDelta < -0.5 ? 'var(--red)' : 'var(--text-dim)';
+  const gdSign = grandDelta >= 0 ? '+' : '';
+  html += `<td class="port-grand" style="color:${gdCol}">${gdSign}$${Math.abs(grandDelta).toFixed(0)}</td></tr>`;
+
+  html += `</tbody></table>`;
+  tableEl.innerHTML = html;
+}
+
 // ─── Boot ────────────────────────────────────────────────────────────────────
 
 // Seed risk input from localStorage (persists across page reloads)
@@ -2290,6 +2484,9 @@ setTimeout(initBacktestDays, 400);
 
 // Load portfolio backtest (staggered so it doesn't compete with single-stock backtest)
 setTimeout(loadPortfolioData, 1200);
+
+// Auto-populate Mode B table from cache if available (no network call needed)
+setTimeout(() => { const c = _cmpCacheGet(); if (c) { _cmpData = c; renderPortBTable(c); } }, 1600);
 
 // Initial scan then adaptive schedule (60 s kill zone, 5 min pre/post-market)
 doScan().then(() => _scheduleScan());
@@ -2431,6 +2628,9 @@ function renderCompare(data) {
 
   // ── Trade log ──
   renderCmpTradeLog(data.trade_log || [], _cmpLogFilter);
+
+  // ── Also populate the Mode B table in the main analysis view ──
+  renderPortBTable(data);
 }
 
 function cmpFilterLog(filter, btn) {
