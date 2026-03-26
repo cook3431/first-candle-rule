@@ -167,4 +167,107 @@ def api_broker_cancel(order_id):
     return jsonify(cancel_order(order_id))
 
 
+@app.route("/api/broker/execute-trail", methods=["POST"])
+def api_broker_execute_trail():
+    """OTO entry + initial hard stop for a trailing stop trade. No take-profit."""
+    from broker import execute_entry_with_trail
+    from trail_manager import trail_manager
+    from models import ActiveTrail, Direction
+
+    data         = request.get_json(silent=True) or {}
+    symbol       = str(data.get("symbol",      "")).upper().strip()
+    direction    = str(data.get("direction",   "")).upper().strip()
+    entry        = float(data.get("entry",       0) or 0)
+    stop_loss    = float(data.get("stop_loss",   0) or 0)
+    risk_dollars = float(data.get("risk_dollars", 100) or 100)
+    risk_dollars = max(10.0, min(50000.0, risk_dollars))
+
+    if not symbol or direction not in ("LONG", "SHORT") or not entry or not stop_loss:
+        return jsonify({"success": False, "error": "Missing or invalid parameters."}), 400
+
+    result = execute_entry_with_trail(symbol, direction, entry, stop_loss, risk_dollars)
+
+    if result["success"]:
+        trail_amount = abs(entry - stop_loss)
+        trail = ActiveTrail(
+            trade_id             = result["order_id"],
+            symbol               = symbol,
+            direction            = Direction.LONG if direction == "LONG" else Direction.SHORT,
+            entry_price          = entry,
+            initial_stop         = stop_loss,
+            initial_risk         = trail_amount,
+            trail_amount         = trail_amount,
+            current_stop         = stop_loss,
+            high_water_mark      = entry,
+            alpaca_stop_order_id = result["order_id"],
+        )
+        trail_manager.register(trail)
+
+    return jsonify(result), (200 if result["success"] else 422)
+
+
+@app.route("/api/broker/trail-update/<trade_id>")
+def api_trail_update(trade_id):
+    """Poll trail state — activates trail at 1R, reports exit if trail fired."""
+    from trail_manager import trail_manager
+    price = float(request.args.get("price", 0) or 0)
+    qty   = int(request.args.get("qty", 1) or 1)
+    if not price:
+        return jsonify({"success": False, "error": "price required"}), 400
+    result = trail_manager.on_price_update(trade_id, price, qty)
+    return jsonify({"success": True, **result})
+
+
+@app.route("/api/portfolio-backtest")
+def api_portfolio_backtest():
+    """
+    Run portfolio backtest comparing Mode A (fixed TP/SL) vs Mode B (trail stop).
+    Query params: stocks (comma-sep), days (default 10, max 20), risk (default 100)
+    """
+    from portfolio_backtest import run_portfolio_backtest, DEFAULT_STOCKS
+
+    stocks_param = request.args.get("stocks", "").strip()
+    days_param   = max(1, min(20, int(request.args.get("days",  10))))
+    risk_param   = max(10.0, min(1000.0, float(request.args.get("risk", 100))))
+
+    stocks = ([s.strip().upper() for s in stocks_param.split(",") if s.strip()]
+              if stocks_param else DEFAULT_STOCKS)
+
+    try:
+        result = run_portfolio_backtest(stocks=stocks, days=days_param, risk=risk_param)
+        result_dict = {
+            "stocks":         result.stocks,
+            "days":           result.days,
+            "risk_per_trade": result.risk_per_trade,
+            "start_date":     str(result.start_date),
+            "end_date":       str(result.end_date),
+            "mode_a":         result.mode_a,
+            "mode_b":         result.mode_b,
+            "trade_log": [
+                {
+                    "symbol":    r.symbol,
+                    "date":      str(r.date),
+                    "mode":      r.mode,
+                    "direction": r.direction,
+                    "entry":     r.entry,
+                    "stop":      r.initial_stop,
+                    "exit":      r.exit_price,
+                    "reason":    r.exit_reason,
+                    "pnl":       r.pnl,
+                    "r":         r.r_multiple,
+                    "qty":       r.qty,
+                }
+                for day in result.day_results
+                for r in [day.mode_a, day.mode_b]
+                if r is not None
+            ],
+            "generated_at": result.generated_at,
+        }
+        resp = make_response(jsonify(result_dict))
+        resp.headers["Cache-Control"] = "public, s-maxage=300"
+        return resp
+    except Exception as e:
+        return jsonify({"status": "ERROR", "reason": str(e)}), 500
+
+
 # Vercel needs the `app` object at module level — nothing else needed

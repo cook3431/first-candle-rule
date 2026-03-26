@@ -232,3 +232,114 @@ def cancel_order(order_id: str) -> dict:
         return {"success": True, "order_id": order_id}
     except Exception as exc:
         return {"success": False, "error": str(exc), "order_id": order_id}
+
+
+def execute_entry_with_trail(
+    symbol:       str,
+    direction:    str,
+    entry:        float,
+    initial_stop: float,
+    risk_dollars: float = 100.0,
+) -> dict:
+    """OTO entry + hard stop for trailing stop trades. No take-profit leg."""
+    if _is_futures(symbol):
+        return {"success": False, "order_id": None, "qty": 0,
+                "error": f"Alpaca does not support futures ({symbol}).", "paper": True}
+
+    st = broker_status()
+    if not st["sdk_available"]:
+        return {"success": False, "order_id": None, "qty": 0,
+                "error": "alpaca-py not installed.", "paper": True}
+    if not st["keys_set"]:
+        return {"success": False, "order_id": None, "qty": 0,
+                "error": "ALPACA_API_KEY / ALPACA_SECRET_KEY not set.", "paper": True}
+
+    qty = calculate_qty(entry, initial_stop, risk_dollars)
+    if qty == 0:
+        return {"success": False, "order_id": None, "qty": 0,
+                "error": "Invalid: entry equals stop.", "paper": st["paper"]}
+
+    client = _get_client()
+    if not client:
+        return {"success": False, "order_id": None, "qty": 0,
+                "error": "Could not create Alpaca client.", "paper": st["paper"]}
+
+    side = OrderSide.BUY if direction == "LONG" else OrderSide.SELL
+    try:
+        order = client.submit_order(
+            LimitOrderRequest(
+                symbol        = symbol,
+                qty           = qty,
+                side          = side,
+                time_in_force = TimeInForce.DAY,
+                limit_price   = round(entry, 2),
+                order_class   = OrderClass.OTO,
+                stop_loss     = StopLossRequest(stop_price=round(initial_stop, 2)),
+            )
+        )
+        trail_amount = abs(entry - initial_stop)
+        return {
+            "success":      True,
+            "order_id":     str(order.id),
+            "symbol":       symbol,
+            "side":         direction,
+            "qty":          qty,
+            "entry":        round(entry, 2),
+            "initial_stop": round(initial_stop, 2),
+            "trail_amount": round(trail_amount, 2),
+            "paper":        st["paper"],
+            "error":        None,
+        }
+    except Exception as exc:
+        return {"success": False, "order_id": None, "qty": 0,
+                "error": str(exc), "paper": st["paper"]}
+
+
+def activate_native_trail(
+    symbol:                str,
+    direction:             str,
+    qty:                   int,
+    trail_amount:          float,
+    current_stop_order_id: str,
+) -> dict:
+    """Swap hard stop for Alpaca native trailing stop at 1R activation."""
+    client = _get_client()
+    if not client:
+        return {"success": False, "error": "Could not create Alpaca client."}
+    try:
+        client.cancel_order_by_id(current_stop_order_id)
+        from alpaca.trading.requests import TrailingStopOrderRequest
+        trail_order = TrailingStopOrderRequest(
+            symbol        = symbol,
+            qty           = qty,
+            side          = OrderSide.SELL if direction == "LONG" else OrderSide.BUY,
+            time_in_force = TimeInForce.DAY,
+            trail_price   = round(trail_amount, 2),
+        )
+        result = client.submit_order(trail_order)
+        return {
+            "success":        True,
+            "trail_order_id": str(result.id),
+            "trail_amount":   round(trail_amount, 2),
+            "error":          None,
+        }
+    except Exception as exc:
+        return {"success": False, "error": str(exc)}
+
+
+def get_order_status(order_id: str) -> dict:
+    """Check the status of any Alpaca order."""
+    client = _get_client()
+    if not client:
+        return {"success": False, "error": "Could not create Alpaca client."}
+    try:
+        order = client.get_order_by_id(order_id)
+        filled_price = float(order.filled_avg_price) if order.filled_avg_price else None
+        return {
+            "success":      True,
+            "order_id":     order_id,
+            "status":       str(order.status.value),
+            "filled_price": filled_price,
+        }
+    except Exception as exc:
+        return {"success": False, "error": str(exc)}

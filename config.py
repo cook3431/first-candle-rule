@@ -136,12 +136,19 @@ class PaperTradingConfig:
 
 
 @dataclass
+class TrailingConfig:
+    enabled:       bool  = False
+    activate_at_r: float = 1.0
+
+
+@dataclass
 class SystemConfig:
     """Master configuration"""
     session: SessionConfig = field(default_factory=SessionConfig)
     strategy: FirstCandleConfig = field(default_factory=FirstCandleConfig)
     market: MarketConfig = field(default_factory=MarketConfig)
     paper: PaperTradingConfig = field(default_factory=PaperTradingConfig)
+    trailing: TrailingConfig = field(default_factory=TrailingConfig)
 
     # Logging
     log_level: str = "INFO"

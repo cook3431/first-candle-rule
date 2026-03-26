@@ -62,6 +62,32 @@ class ConfidenceGrade(Enum):
     TRAP   = "TRAP"
 
 
+class TrailMethod(Enum):
+    FIXED_DOLLAR = "fixed_dollar"
+
+@dataclass
+class TrailingStopConfig:
+    enabled:       bool        = False
+    method:        TrailMethod = TrailMethod.FIXED_DOLLAR
+    activate_at_r: float       = 1.0
+
+@dataclass
+class ActiveTrail:
+    """Live state of a trailing stop on a single active trade."""
+    trade_id:             str
+    symbol:               str
+    direction:            Direction
+    entry_price:          float
+    initial_stop:         float
+    initial_risk:         float
+    trail_amount:         float
+    current_stop:         float
+    high_water_mark:      float
+    activated:            bool               = False
+    alpaca_stop_order_id: str               = ""
+    last_updated:         Optional[datetime] = None
+
+
 @dataclass
 class ConfidenceScore:
     grade:                ConfidenceGrade
@@ -205,6 +231,9 @@ class Trade:
     pnl_ticks: float = 0.0
     commission: float = 0.0
     notes: str = ""
+    trail_config:  Optional['TrailingStopConfig'] = None
+    active_trail:  Optional['ActiveTrail']         = None
+    peak_r:        float = 0.0
 
 
 @dataclass
