@@ -2295,13 +2295,42 @@ function renderPortfolioTable() {
 
 // ─── Mode B Portfolio Table ──────────────────────────────────────────────────
 
-function loadPortBData() {
+async function loadPortBData() {
+  const statEl = document.getElementById('portBStatus');
+  const summEl = document.getElementById('portBSummary');
+
+  // If we already have fresh data in memory, just re-render
   if (_cmpData) { renderPortBTable(_cmpData); return; }
-  document.getElementById('portBStatus').textContent = 'Running ~60s…';
-  document.getElementById('portBSummary').innerHTML =
+
+  // Try the 6-hour localStorage cache
+  const cached = _cmpCacheGet();
+  if (cached) {
+    _cmpData = cached;
+    renderPortBTable(cached);
+    if (statEl) statEl.textContent = 'From cache';
+    return;
+  }
+
+  // Fresh fetch — show spinner
+  if (statEl) statEl.textContent = 'Running…';
+  if (summEl) summEl.innerHTML =
     '<div style="text-align:center;padding:14px;color:var(--text-dim);font-size:12px">' +
-    '<span class="spinner"></span>&nbsp; Running 10 stocks × 10 days — please wait…</div>';
-  runCompareBacktest(false);   // shared data; renderCompare() will call renderPortBTable()
+    '<span class="spinner"></span>&nbsp; Running 10 stocks × 10 days…</div>';
+
+  try {
+    const r    = await fetch('/api/portfolio-backtest');
+    const data = await r.json();
+    if (data.status === 'ERROR') throw new Error(data.reason || 'Unknown error');
+    _cmpData = data;
+    _cmpCacheSet(data);
+    renderPortBTable(data);
+    if (statEl) statEl.textContent = data.generated_at || 'Done';
+  } catch(e) {
+    if (statEl) statEl.textContent = 'Error — click ▶ to retry';
+    if (summEl) summEl.innerHTML =
+      '<div style="text-align:center;padding:14px;color:var(--red);font-size:12px">⚠ ' + e.message + '</div>';
+    showToast('Mode B error: ' + e.message, 'danger');
+  }
 }
 
 function renderPortBTable(data) {
@@ -2512,7 +2541,7 @@ setInterval(() => {
 
 // ─── Compare (Portfolio Backtest) ────────────────────────────────────────────
 
-const _CMP_CACHE_KEY = 'cmpCache_v1';
+const _CMP_CACHE_KEY = 'cmpCache_v2';
 let _cmpData = null;
 let _cmpLogFilter = 'all';
 
