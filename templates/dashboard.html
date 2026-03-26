@@ -897,8 +897,8 @@ function render(data) {
     beep(d==='LONG'?'buy':'sell');
     document.getElementById('sigCard').classList.add(d==='LONG'?'fx-g':'fx-r');
     setTimeout(()=>document.getElementById('sigCard').classList.remove('fx-g','fx-r'),3500);
-    pushAlert(`SIGNAL: ${d} ${data.symbol} @ ${(e||0).toFixed(2)} | SL ${(data.stop_loss||0).toFixed(2)} | TP ${(data.take_profit||0).toFixed(2)} | R:R ${(data.risk_reward||0).toFixed(1)}`, d==='LONG'?'success':'danger');
-    if (Notification.permission==='granted') new Notification(`${d==='LONG'?'▲ BUY':'▼ SELL'} ${data.symbol}`,{body:`Entry ${(e||0).toFixed(2)} | SL ${(data.stop_loss||0).toFixed(2)} | TP ${(data.take_profit||0).toFixed(2)}`});
+    pushAlert(`SIGNAL: ${d} ${data.symbol} @ ${(e||0).toFixed(2)} | SL ${(data.stop_loss||0).toFixed(2)} | Trail target ~${(data.take_profit||0).toFixed(2)} ref | R:R ${(data.risk_reward||0).toFixed(1)}`, d==='LONG'?'success':'danger');
+    if (Notification.permission==='granted') new Notification(`${d==='LONG'?'▲ BUY':'▼ SELL'} ${data.symbol}`,{body:`Entry ${(e||0).toFixed(2)} | SL ${(data.stop_loss||0).toFixed(2)} | Mode B trail — no fixed TP`});
     // ── AUTO-EXECUTE ───────────────────────────────────────────────────────
     if (LS.autoExecute && _brokerEnabled && !data.symbol.endsWith('=F')) {
       autoExecuteTrade(data);
@@ -1081,7 +1081,7 @@ function setSym(s) {
 
 function enterTrade() {
   if (LS.autoExecute && _brokerEnabled) {
-    pushAlert('Auto-execute is ON — Alpaca will place the order automatically when a signal fires.','info');
+    pushAlert('Trail Auto-Execute is ON — Mode B trailing stop order placed automatically on next signal.','info');
     return;
   }
   LS.inTrade=true;
@@ -1093,6 +1093,7 @@ function enterTrade() {
 function exitTrade() {
   if(!confirm('Mark this trade as closed and reset the scanner?')) return;
   LS.inTrade=false; LS.signal=null;
+  _trailTradeId=null; _trailQty=0;   // clear Mode B trail state
   pushAlert('Trade closed — scanner reset','info');
   if (_brokerEnabled) refreshPositions();
   doScan(true);
@@ -1125,7 +1126,7 @@ function updateAutoExecuteUI() {
   const on   = LS.autoExecute;
   const risk = LS.riskPerTrade;
   wrap.classList.toggle('on', on);
-  lbl.textContent = on ? 'Auto-Execute: ON' : 'Auto-Execute: OFF';
+  lbl.textContent = on ? 'Trail Auto-Execute: ON' : 'Trail Auto-Execute: OFF';
   // Keep risk input and status line in sync
   const inp = document.getElementById('riskInput');
   if (inp && document.activeElement !== inp) inp.value = risk;
@@ -1158,6 +1159,10 @@ function toggleAutoExecute() {
   if (LS.signal) render(Object.assign({}, LS.signal, {current_price: null}));
 }
 
+// ── Mode B trail state ────────────────────────────────────────────────────────
+let _trailTradeId = null;   // Alpaca order ID of the active OTO entry order
+let _trailQty     = 0;      // shares/contracts in active trail trade
+
 async function autoExecuteTrade(sig) {
   const sym = sig.symbol || LS.sym;
 
@@ -1174,11 +1179,12 @@ async function autoExecuteTrade(sig) {
   }
 
   const risk = LS.riskPerTrade;
-  showToast(`⚡ Executing ${sig.direction} ${sym} — risking $${risk.toLocaleString()}…`, 'info');
-  pushAlert(`Auto-executing: ${sig.direction} ${sym} @ ${(sig.entry||0).toFixed(2)} | SL ${(sig.stop_loss||0).toFixed(2)} | TP ${(sig.take_profit||0).toFixed(2)} | Risk $${risk.toLocaleString()}`, 'info');
+  showToast(`⚡ Mode B Trail: ${sig.direction} ${sym} — risking $${risk.toLocaleString()}…`, 'info');
+  pushAlert(`Auto-executing (Mode B): ${sig.direction} ${sym} @ ${(sig.entry||0).toFixed(2)} | SL ${(sig.stop_loss||0).toFixed(2)} | Trail activates at 1R | Risk $${risk.toLocaleString()}`, 'info');
 
   try {
-    const r = await fetch('/api/broker/execute', {
+    // Mode B: OTO entry + hard stop — NO fixed take-profit. Trail activates at 1R.
+    const r = await fetch('/api/broker/execute-trail', {
       method:  'POST',
       headers: {'Content-Type': 'application/json'},
       body:    JSON.stringify({
@@ -1186,7 +1192,6 @@ async function autoExecuteTrade(sig) {
         direction:    sig.direction,
         entry:        sig.entry,
         stop_loss:    sig.stop_loss,
-        take_profit:  sig.take_profit,
         risk_dollars: risk,
       }),
     });
@@ -1194,15 +1199,17 @@ async function autoExecuteTrade(sig) {
 
     if (d.success) {
       LS.markExecutedToday(sym);
-      LS.inTrade = true;
-      LS.signal  = sig;
+      LS.inTrade   = true;
+      LS.signal    = sig;
+      _trailTradeId = d.order_id;
+      _trailQty     = d.qty;
       const mode = d.paper ? '[PAPER]' : '[LIVE]';
-      showToast(`✅ ${mode} Order placed! ${d.qty} × ${sym} (risk $${risk.toLocaleString()})`, 'success');
+      showToast(`✅ ${mode} Trail order live! ${d.qty} × ${sym} — trail activates at 1R`, 'success');
       pushAlert(
-        `${mode} BRACKET ORDER: ${d.side} ${d.qty} × ${d.symbol} | Entry $${d.entry} | SL $${d.stop_loss} | TP $${d.take_profit} | Risk $${risk.toLocaleString()} | ID: ${(d.order_id||'').slice(0,8)}…`,
+        `${mode} TRAIL ORDER: ${d.side} ${d.qty} × ${sym} | Entry $${d.entry} | Hard SL $${d.initial_stop} | Trail = $${(d.trail_amount||0).toFixed(2)}/share (activates at 1R) | ID: ${(d.order_id||'').slice(0,8)}…`,
         'success'
       );
-      setTimeout(refreshPositions, 1500);   // brief delay so Alpaca reflects the order
+      setTimeout(refreshPositions, 1500);
     } else {
       showToast(`⚠ Order failed: ${d.error || 'Unknown error'}`, 'danger');
       pushAlert(`Broker error: ${d.error || 'Unknown error'}`, 'danger');
@@ -2580,7 +2587,7 @@ setTimeout(() => { const c = _cmpCacheGet(); if (c) { _cmpData = c; renderPortBT
 // Initial scan then adaptive schedule (60 s kill zone, 5 min pre/post-market)
 doScan().then(() => _scheduleScan());
 
-// Price update: every 30 s only while in an active trade
+// Price update + Mode B trail poll — every 30 s while in an active trade
 setInterval(async()=>{
   if(!LS.inTrade) return;
   try {
@@ -2590,6 +2597,33 @@ setInterval(async()=>{
       document.getElementById('curP').textContent=d.price.toFixed(2);
       const sig=LS.signal;
       if(sig) render(Object.assign({},sig,{current_price:d.price}));
+
+      // ── Mode B: poll trail state on every price tick ──────────────────
+      if (_trailTradeId && _brokerEnabled) {
+        try {
+          const tr = await fetch(
+            `/api/broker/trail-update/${encodeURIComponent(_trailTradeId)}` +
+            `?price=${d.price}&qty=${_trailQty}`
+          );
+          const td = await tr.json();
+          if (td.success) {
+            if (td.action === 'activated') {
+              pushAlert(`🔁 Trail ACTIVATED at 1R — Alpaca native trailing stop now live | ID: ${(td.new_stop_order_id||'').slice(0,8)}…`, 'success');
+              showToast('Trail activated at 1R — stop now trailing price', 'success');
+            } else if (td.action === 'exited') {
+              const exitP = td.exit_price ? `$${Number(td.exit_price).toFixed(2)}` : 'market';
+              pushAlert(`🏁 Trail STOP HIT — exited ${LS.sym} @ ${exitP}`, 'info');
+              showToast(`Trail stop hit — exited @ ${exitP}`, 'info');
+              _trailTradeId = null;
+              _trailQty     = 0;
+              LS.inTrade    = false;
+              LS.signal     = null;
+              doScan(true);
+              refreshPositions();
+            }
+          }
+        } catch(e) {}  // trail poll errors are non-fatal
+      }
     }
   } catch(e){}
 }, 30_000);
