@@ -191,17 +191,17 @@
   /* ── Broker / auto-execute ────────────────────────────────────────────── */
   @keyframes fadeInUp { from{opacity:0;transform:translateY(10px)} to{opacity:1;transform:translateY(0)} }
 
-  /* Toggle pill */
-  .ae-wrap { display:flex; align-items:center; gap:7px; padding:4px 10px; background:var(--surface2); border:1px solid var(--border); border-radius:6px; opacity:.35; transition:opacity .25s; }
-  .ae-wrap.ready { opacity:1; }
-  .ae-track { position:relative; width:34px; height:18px; cursor:pointer; flex-shrink:0; }
-  .ae-track input { opacity:0; width:0; height:0; position:absolute; }
+  /* Toggle pill — state driven entirely by .on class, no checkbox */
+  .ae-wrap { display:flex; align-items:center; gap:7px; padding:4px 10px; background:var(--surface2); border:1px solid var(--border); border-radius:6px; cursor:pointer; user-select:none; transition:border-color .2s; }
+  .ae-wrap:hover { border-color:var(--blue); }
+  .ae-wrap.on    { border-color:var(--green); }
+  .ae-track { position:relative; width:34px; height:18px; flex-shrink:0; }
   .ae-rail  { position:absolute; inset:0; border-radius:9px; background:var(--gray); transition:.2s; }
   .ae-thumb { position:absolute; height:14px; width:14px; left:2px; bottom:2px; border-radius:50%; background:#fff; transition:.2s; }
-  .ae-track input:checked ~ .ae-rail  { background:var(--green); }
-  .ae-track input:checked ~ .ae-thumb { transform:translateX(16px); }
-  .ae-lbl   { font-size:11px; font-weight:700; color:var(--text-dim); white-space:nowrap; user-select:none; }
-  .ae-lbl.on { color:var(--green); }
+  .ae-wrap.on .ae-rail  { background:var(--green); }
+  .ae-wrap.on .ae-thumb { transform:translateX(16px); }
+  .ae-lbl   { font-size:11px; font-weight:700; color:var(--text-dim); white-space:nowrap; }
+  .ae-wrap.on .ae-lbl { color:var(--green); }
 </style>
 </head>
 <body>
@@ -229,13 +229,12 @@
     <button class="mode-btn"        id="modeMonitor"  onclick="setMonMode('monitor')">📡 Live Monitor</button>
   </div>
   <div class="spacer"></div>
-  <!-- Alpaca auto-execute toggle — greyed out until broker keys configured -->
-  <div class="ae-wrap" id="aeWrap" title="Requires ALPACA_API_KEY in Vercel environment variables">
-    <label class="ae-track" onclick="toggleAutoExecute()">
-      <input type="checkbox" id="aeToggle" disabled>
+  <!-- Alpaca auto-execute toggle -->
+  <div class="ae-wrap" id="aeWrap" onclick="toggleAutoExecute()" title="Auto-execute trades via Alpaca when a signal fires">
+    <div class="ae-track">
       <span class="ae-rail"></span>
       <span class="ae-thumb"></span>
-    </label>
+    </div>
     <span class="ae-lbl" id="aeLbl">Auto-Execute</span>
   </div>
   <span class="scan-info" id="scanInfo">–</span>
@@ -884,7 +883,7 @@ async function checkBrokerStatus() {
   } catch(e) {
     _brokerEnabled = false;
   }
-  updateAutoExecuteUI();
+  updateAutoExecuteUI();   // sync toggle visual to current LS.autoExecute
   if (_brokerEnabled) {
     document.getElementById('positionsCard').style.display = '';
     refreshPositions();
@@ -893,32 +892,24 @@ async function checkBrokerStatus() {
 }
 
 function updateAutoExecuteUI() {
-  const wrap   = document.getElementById('aeWrap');
-  const toggle = document.getElementById('aeToggle');
-  const lbl    = document.getElementById('aeLbl');
+  const wrap = document.getElementById('aeWrap');
+  const lbl  = document.getElementById('aeLbl');
   if (!wrap) return;
-
-  if (!_brokerEnabled) {
-    wrap.classList.remove('ready');
-    toggle.disabled  = true;
-    toggle.checked   = false;
-    lbl.textContent  = 'Auto-Execute';
-    lbl.classList.remove('on');
-    return;
-  }
-
-  wrap.classList.add('ready');
-  toggle.disabled = false;
-  toggle.checked  = LS.autoExecute;
-  lbl.textContent = LS.autoExecute ? 'Auto-Execute: ON' : 'Auto-Execute: OFF';
-  lbl.classList.toggle('on', LS.autoExecute);
+  const on = LS.autoExecute;
+  wrap.classList.toggle('on', on);
+  lbl.textContent = on ? 'Auto-Execute: ON' : 'Auto-Execute: OFF';
 }
 
 function toggleAutoExecute() {
-  if (!_brokerEnabled) return;
   LS.autoExecute = !LS.autoExecute;
   updateAutoExecuteUI();
-  pushAlert(`Auto-Execute ${LS.autoExecute ? 'ENABLED — trades will be placed automatically via Alpaca' : 'DISABLED — manual mode'}`, LS.autoExecute ? 'success' : 'info');
+  const on = LS.autoExecute;
+  if (on && !_brokerEnabled) {
+    showToast('Toggle ON — add Alpaca API keys in Vercel to enable live execution', 'warning');
+    pushAlert('Auto-Execute ON (Alpaca not yet configured — add ALPACA_API_KEY to Vercel env vars)', 'warning');
+  } else {
+    pushAlert(`Auto-Execute ${on ? 'ENABLED — trades will be placed automatically via Alpaca' : 'DISABLED — manual mode'}`, on ? 'success' : 'info');
+  }
   // Re-render to update button visibility
   if (LS.signal) render(Object.assign({}, LS.signal, {current_price: null}));
 }
